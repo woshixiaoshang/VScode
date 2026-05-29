@@ -235,6 +235,7 @@ class RamanHighWavenumberProcessor:
         )
         return np.array(denoised_spectra), summary
 
+
     # ──────────────────────────────────────────────────────────
     # 异常值筛选与面积归一化
     # ──────────────────────────────────────────────────────────
@@ -246,6 +247,25 @@ class RamanHighWavenumberProcessor:
             std = np.nanstd(values)
             return np.zeros_like(values) if std < AREA_EPS else (values - np.nanmean(values)) / std
         return 0.6745 * (values - med) / mad
+    
+    def _local_baseline_correct(self, spectra, anchor_lo=2800, anchor_hi=3000):
+        wn = self.wavenumber_data
+        lo_idx = np.argmin(np.abs(wn - anchor_lo))
+        hi_idx = np.argmin(np.abs(wn - anchor_hi))
+
+        # 各端取5点均值作为锚点强度，比单点稳健
+        lo_range = slice(lo_idx, min(lo_idx + 5, len(wn)))
+        hi_range = slice(max(hi_idx - 5, 0), hi_idx + 1)
+
+        corrected = []
+        for sp in spectra:
+            y_lo = sp[lo_range].mean()
+            y_hi = sp[hi_range].mean()
+            baseline = y_lo + (y_hi - y_lo) * (wn - wn[lo_idx]) / (wn[hi_idx] - wn[lo_idx] + 1e-12)
+            corrected_sp = sp - baseline  # 全段减去基线
+            corrected.append(corrected_sp)
+
+        return np.array(corrected)
 
     def _peak_area_normalize(self, spectra):
         areas = np.trapz(spectra, self.wavenumber_data, axis=1)
@@ -382,8 +402,8 @@ class RamanHighWavenumberProcessor:
         self.processed_data = self.spectra_data.copy()
         self.processed_filenames = self.file_names.copy()
 
-        print("\n  ✓ 跳过基线校正（水峰包区域，基线难以可靠估计）")
-        print("  ✓ 仅处理 2800~3000 cm⁻¹ 区域")
+        print("\n  ✓ 跳过全谱基线校正（水峰包区域不适合airPLS）")
+        print("  ✓ 将在去噪后做局部线性基线校正（2820~2960 cm⁻¹）")
 
         if denoising:
             print("\n1. 去噪处理...")
@@ -392,6 +412,11 @@ class RamanHighWavenumberProcessor:
             print(f"  平均SNR: {denoise_params[3]:.2f} dB")
         else:
             print("\n1. 跳过去噪步骤")
+
+        # 局部线性基线校正（2820~2960 cm⁻¹两端锚点）
+        print("\n2. 局部基线校正（2820~2960 cm⁻¹线性基线）...")
+        self.processed_data = self._local_baseline_correct(self.processed_data, anchor_lo=2800, anchor_hi=3000)
+        print("  ✓ 完成，消除缓慢上升背景，峰形不变")
 
         if area_normalization:
             print("\n2. 异常值筛选与峰面积归一化...")
