@@ -253,17 +253,16 @@ class RamanHighWavenumberProcessor:
         lo_idx = np.argmin(np.abs(wn - anchor_lo))
         hi_idx = np.argmin(np.abs(wn - anchor_hi))
 
-        # 各端取5点均值作为锚点强度，比单点稳健
-        lo_range = slice(lo_idx, min(lo_idx + 5, len(wn)))
-        hi_range = slice(max(hi_idx - 5, 0), hi_idx + 1)
+        # 左端单点，右端5点均值
+        hi_range = slice(max(hi_idx - 4, 0), hi_idx + 1)
 
         corrected = []
+       
         for sp in spectra:
-            y_lo = sp[lo_range].mean()
-            y_hi = sp[hi_range].mean()
+            y_lo = sp[lo_idx]                # 左端单点
+            y_hi = sp[hi_range].mean()       # 右端5点均值
             baseline = y_lo + (y_hi - y_lo) * (wn - wn[lo_idx]) / (wn[hi_idx] - wn[lo_idx] + 1e-12)
-            corrected_sp = sp - baseline  # 全段减去基线
-            corrected.append(corrected_sp)
+            corrected.append(sp - baseline)
 
         return np.array(corrected)
 
@@ -325,7 +324,7 @@ class RamanHighWavenumberProcessor:
             for sp in spectra_kept
         ])
         pcc_z = self._robust_z(pcc)
-        shape_reject = np.isfinite(pcc_z) & (pcc_z < -OUTLIER_PCC_SIGMA)
+        shape_reject = np.isfinite(pcc_z) & (pcc_z < -OUTLIER_PCC_SIGMA) & (pcc < 0.80) & (pcc < 0.80)
 
         pca_dist = np.full(len(kept_idx), np.nan)
         pca_z = np.full(len(kept_idx), np.nan)
@@ -339,6 +338,8 @@ class RamanHighWavenumberProcessor:
             pca_dist = np.sqrt(np.sum(((scores - center) / spread) ** 2, axis=1))
             pca_z = self._robust_z(pca_dist)
             shape_reject |= np.isfinite(pca_z) & (pca_z > OUTLIER_PCA_SIGMA)
+            
+            print(f"  PCC均值={np.nanmean(pcc):.4f}, 标准差={np.nanstd(pcc):.4f}, 最小值={np.nanmin(pcc):.4f}")
 
         for local_i, original_i in enumerate(kept_idx):
             report[original_i]["pcc_to_median"] = pcc[local_i]
@@ -360,6 +361,9 @@ class RamanHighWavenumberProcessor:
     def _apply_outlier_filter_and_normalization(self, spectra, filenames, outlier_filter=True):
         if outlier_filter:
             keep_mask, report = self._filter_outliers_before_normalization(spectra, filenames)
+            
+            n_before_norm = keep_mask.sum()
+            print(f"  第一轮筛选后剩余: {n_before_norm} 条")
         else:
             keep_mask = np.ones(len(spectra), dtype=bool)
             report = [{
@@ -382,6 +386,10 @@ class RamanHighWavenumberProcessor:
 
         if outlier_filter:
             keep_mask, report = self._filter_outliers_after_normalization(normalized_all, keep_mask, report)
+            n_after_norm = keep_mask.sum()
+            print(f"  第二轮筛选后剩余: {n_after_norm} 条")
+        
+            
 
         if keep_mask.sum() == 0:
             print("  ⚠️ 异常值筛选会剔除全部光谱，已自动保留全部光谱；请检查阈值或原始数据")
@@ -403,7 +411,7 @@ class RamanHighWavenumberProcessor:
         self.processed_filenames = self.file_names.copy()
 
         print("\n  ✓ 跳过全谱基线校正（水峰包区域不适合airPLS）")
-        print("  ✓ 将在去噪后做局部线性基线校正（2820~2960 cm⁻¹）")
+        print("  ✓ 将在去噪后做局部线性基线校正（2800~3000 cm⁻¹）")
 
         if denoising:
             print("\n1. 去噪处理...")
@@ -413,10 +421,10 @@ class RamanHighWavenumberProcessor:
         else:
             print("\n1. 跳过去噪步骤")
 
-        # 局部线性基线校正（2820~2960 cm⁻¹两端锚点）
-        print("\n2. 局部基线校正（2820~2960 cm⁻¹线性基线）...")
-        self.processed_data = self._local_baseline_correct(self.processed_data, anchor_lo=2800, anchor_hi=3000)
-        print("  ✓ 完成，消除缓慢上升背景，峰形不变")
+        # 局部线性基线校正（2800~3000 cm⁻¹两端锚点）
+        #print("\n2. 局部基线校正（2800~3000 cm⁻¹线性基线）...")
+        #self.processed_data = self._local_baseline_correct(self.processed_data, anchor_lo=2800, anchor_hi=3000)
+        #print("  ✓ 完成，消除缓慢上升背景，峰形不变")
 
         if area_normalization:
             print("\n2. 异常值筛选与峰面积归一化...")
@@ -432,9 +440,31 @@ class RamanHighWavenumberProcessor:
         else:
             print("\n2. 跳过面积归一化")
 
+    
+        
+
+        def peak_area_ratio(wavenumber, spectrum,
+                    peak1=(2835, 2870),
+                    peak2=(2910, 2960)):
+            m1 = (wavenumber >= peak1[0]) & (wavenumber <= peak1[1])
+            m2 = (wavenumber >= peak2[0]) & (wavenumber <= peak2[1])
+            area1 = np.trapz(spectrum[m1], wavenumber[m1])
+            area2 = np.trapz(spectrum[m2], wavenumber[m2])
+            return area1 / (area2 + 1e-12)
+
+        ratios = np.array([peak_area_ratio(self.wavenumber_data, sp) 
+                            for sp in self.processed_data])
+
+        print(f"  均值:   {ratios.mean():.4f}")
+        print(f"  中位数: {np.median(ratios):.4f}")
+        print(f"  标准差: {ratios.std():.4f}")
+        print(f"  范围:   {ratios.min():.4f} ~ {ratios.max():.4f}")
+        print(f"  CV:     {ratios.std()/ratios.mean()*100:.1f}%")
+        
         print("\n✅ 高波数区域处理完成！")
         return self.processed_data, self.processed_filenames
-
+    
+    
     # ──────────────────────────────────────────────────────────
     # 保存数据
     # ──────────────────────────────────────────────────────────
@@ -684,7 +714,62 @@ if __name__ == "__main__":
 
     data_save_dir = os.path.join(save_folder, "Data")
     processor.save_processed_data(data_save_dir)
-    processor.save_outlier_report(data_save_dir)
+
+    # outlier report保存到Data同层（save_folder下），不放进Data文件夹
+    processor.save_outlier_report(save_folder)
+
+    # ── 保存峰面积比csv，也放在Data同层 ──────────────────────
+    print("\n--- 计算并保存2850/2930峰面积比 ---")
+    wn = processor.wavenumber_data
+    m1 = (wn >= 2835) & (wn <= 2870)
+    m2 = (wn >= 2910) & (wn <= 2960)
+
+    ratio_rows = []
+    for i, sp in enumerate(processor.processed_data):
+        area1 = float(np.trapz(sp[m1], wn[m1]))
+        area2 = float(np.trapz(sp[m2], wn[m2]))
+        ratio = area1 / (area2 + 1e-12)
+        ratio_rows.append({
+            "index": i,
+            "filename": processor.processed_filenames[i],
+            "ratio_2850_2930": round(ratio, 6),
+            "area_2850": round(area1, 8),
+            "area_2930": round(area2, 8),
+        })
+
+    ratio_csv_path = os.path.join(save_folder, "peak_area_ratio_2850_2930.csv")
+    import csv as _csv
+    with open(ratio_csv_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = _csv.DictWriter(f, fieldnames=["index", "filename", "ratio_2850_2930", "area_2850", "area_2930"])
+        writer.writeheader()
+        writer.writerows(ratio_rows)
+
+    ratio_arr = np.array([r["ratio_2850_2930"] for r in ratio_rows])
+    print(f"  均值:   {ratio_arr.mean():.4f}")
+    print(f"  中位数: {np.median(ratio_arr):.4f}")
+    print(f"  标准差: {ratio_arr.std():.4f}")
+    print(f"  CV:     {ratio_arr.std()/ratio_arr.mean()*100:.1f}%")
+    print(f"✅ 峰面积比已保存至: {ratio_csv_path}")
+
+    # ── 保存统计摘要 ───────────────────────────────────────────
+    summary_path = os.path.join(save_folder, "peak_area_ratio_summary.txt")
+    with open(summary_path, "w", encoding="utf-8-sig") as f:
+        f.write("2850/2930 峰面积比统计摘要\n")
+        f.write("=" * 35 + "\n")
+        f.write(f"数据来源:   {data_folder}\n")
+        f.write(f"有效光谱数: {len(ratio_rows)}\n")
+        f.write(f"峰区间:     2835~2870 / 2910~2960 cm⁻¹\n")
+        f.write("-" * 35 + "\n")
+        f.write(f"均值:       {ratio_arr.mean():.6f}\n")
+        f.write(f"中位数:     {np.median(ratio_arr):.6f}\n")
+        f.write(f"标准差:     {ratio_arr.std():.6f}\n")
+        f.write(f"SEM:        {ratio_arr.std()/np.sqrt(len(ratio_arr)):.6f}\n")
+        f.write(f"CV:         {ratio_arr.std()/ratio_arr.mean()*100:.2f}%\n")
+        f.write(f"最小值:     {ratio_arr.min():.6f}\n")
+        f.write(f"最大值:     {ratio_arr.max():.6f}\n")
+        f.write(f"25%分位数:  {np.percentile(ratio_arr, 25):.6f}\n")
+        f.write(f"75%分位数:  {np.percentile(ratio_arr, 75):.6f}\n")
+    print(f"✅ 统计摘要已保存至: {summary_path}")
 
     if config['generate_plots']:
         print("\n--- 正在生成图表 ---")
