@@ -1,0 +1,172 @@
+import os
+import re
+from collections import Counter, defaultdict
+
+#=================================================
+# 修改这里
+#=================================================
+root_folder = r"D:\aaaSCNU\0data\Amyloid王惊华\Amyloid整理后\BM\AL治疗前BM53+11"
+
+#=================================================
+# 提取wxd后四位编号
+#=================================================
+def extract_wxd_id(filename):
+    """
+    支持：
+    wxd103F.tmp_xxx
+    wxdBD00_xxx
+
+    返回：
+    103F
+    BD00
+    """
+
+    m = re.search(r'wxd([A-Za-z0-9]{4})', filename, re.IGNORECASE)
+
+    if m:
+        return m.group(1).upper()
+
+    return None
+
+
+#=================================================
+# 判断是否最深层文件夹
+#=================================================
+def is_leaf(folder):
+
+    for item in os.listdir(folder):
+
+        if os.path.isdir(os.path.join(folder, item)):
+            return False
+
+    return True
+
+
+multi_wxd_folder = []
+
+name_error_folder = []
+
+leaf_num = 0
+
+#=================================================
+# 开始检查
+#=================================================
+for folder, dirs, files in os.walk(root_folder):
+
+    if not is_leaf(folder):
+        continue
+
+    leaf_num += 1
+
+    txt_files = [f for f in files if f.lower().endswith(".txt")]
+
+    if len(txt_files) == 0:
+        continue
+
+    wxd_map = defaultdict(list)
+
+    for file in txt_files:
+
+        wxd = extract_wxd_id(file)
+
+        if wxd is not None:
+            wxd_map[wxd].append(file)
+
+    #------------------------------------------------
+    # 第一部分：多个wxd编号
+    #------------------------------------------------
+    if len(wxd_map) > 1:
+
+        multi_wxd_folder.append((folder, wxd_map))
+
+    #------------------------------------------------
+    # 第二部分：命名不一致
+    #------------------------------------------------
+    if len(wxd_map) > 1:
+
+        counter = Counter()
+
+        for wxd, filelist in wxd_map.items():
+            counter[wxd] = len(filelist)
+
+        # 数量最多的认为正确编号
+        main_wxd = counter.most_common(1)[0][0]
+
+        wrong_files = []
+
+        for wxd, filelist in wxd_map.items():
+
+            if wxd != main_wxd:
+
+                for f in filelist:
+                    wrong_files.append((f, wxd))
+
+        name_error_folder.append(
+            (folder, main_wxd, wrong_files)
+        )
+
+#=================================================
+# 输出报告
+#=================================================
+report_path = os.path.join(root_folder, "wxd检查报告.txt")
+
+with open(report_path, "w", encoding="utf-8") as f:
+
+    f.write("="*90+"\n")
+    f.write("WXD检查报告\n")
+    f.write("="*90+"\n\n")
+
+    f.write(f"检查最深层文件夹数量：{leaf_num}\n")
+    f.write(f"发现多个wxd编号文件夹：{len(multi_wxd_folder)}\n\n")
+
+    #=================================================
+    # 第一部分
+    #=================================================
+    f.write("【第一部分：包含多个WXD编号的文件夹】\n\n")
+
+    if len(multi_wxd_folder)==0:
+
+        f.write("未发现。\n\n")
+
+    else:
+
+        for folder, wxd_map in multi_wxd_folder:
+
+            f.write(f"文件夹：{folder}\n")
+
+            for wxd, filelist in wxd_map.items():
+
+                f.write(f"    wxd{wxd}    ({len(filelist)}个文件)\n")
+
+            f.write("\n")
+
+    #=================================================
+    # 第二部分
+    #=================================================
+    f.write("="*90+"\n")
+    f.write("【第二部分：命名不一致文件】\n\n")
+
+    if len(name_error_folder)==0:
+
+        f.write("未发现。\n")
+
+    else:
+
+        for folder, main_wxd, wrong_files in name_error_folder:
+
+            f.write(f"文件夹：{folder}\n")
+            f.write(f"主编号：wxd{main_wxd}\n")
+            f.write("异常文件：\n")
+
+            for filename, wxd in wrong_files:
+
+                f.write(f"    {filename}\n")
+                f.write(f"        实际编号：wxd{wxd}\n")
+
+            f.write("\n")
+
+print("="*60)
+print("检查完成！")
+print(f"最深层文件夹：{leaf_num}")
+print(f"多个wxd编号文件夹：{len(multi_wxd_folder)}")
+print(f"报告位置：{report_path}")

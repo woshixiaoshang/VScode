@@ -6,7 +6,7 @@ import os
 # 配置区：脚本路径（只需设置一次）
 # ============================================================
 OUTLIER_SCRIPT    = r"D:\APP\Vscode\Vscode-test\拉曼数据预处理\异常值.py"      # ← 改成你的实际路径
-PREPROCESS_SCRIPT = r"D:\APP\Vscode\Vscode-test\拉曼数据预处理\Raman预处理1.py" # ← 改成你的实际路径
+PREPROCESS_SCRIPT = r"D:\APP\Vscode\Vscode-test\拉曼数据预处理\Raman预处理.py" # ← 改成你的实际路径
 
 # target.txt 查找逻辑（和两个脚本保持一致，自动找桌面或脚本目录）
 def find_target_file():
@@ -49,9 +49,9 @@ def read_target():
     raw_dir    = None
     result_dir = None
     for i, line in enumerate(lines):
-        if "异常值" in line and i + 1 < len(lines):
+        if line == "异常值" and i + 1 < len(lines):
             raw_dir = lines[i + 1]
-        if "预处理" in line and i + 1 < len(lines):
+        if line == "预处理" and i + 1 < len(lines):
             result_dir = lines[i + 1]
 
     if raw_dir is None:
@@ -70,6 +70,46 @@ def write_target(target_file, lines):
     with open(target_file, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
+
+def update_target_paths(target_file, raw_dir=None, result_dir=None, preprocess_input=None):
+    """更新 target.txt 中的路径标签，保留其他内容。"""
+    with open(target_file, "r", encoding="utf-8") as f:
+        lines = [line.rstrip("\n") for line in f.readlines()]
+
+    out_lines = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if stripped == "异常值" and raw_dir is not None and i + 1 < len(lines):
+            out_lines.append(line)
+            out_lines.append(raw_dir)
+            i += 2
+            continue
+        if stripped == "预处理" and result_dir is not None and i + 1 < len(lines):
+            out_lines.append(line)
+            out_lines.append(result_dir)
+            i += 2
+            continue
+        if stripped == "预处理输入" and preprocess_input is not None and i + 1 < len(lines):
+            out_lines.append(line)
+            out_lines.append(preprocess_input)
+            i += 2
+            continue
+        out_lines.append(line)
+        i += 1
+
+    # 如果原文件中缺少标签，则追加
+    if raw_dir is not None and not any(line.strip() == "异常值" for line in lines):
+        out_lines.extend(["异常值", raw_dir])
+    if result_dir is not None and not any(line.strip() == "预处理" for line in lines):
+        out_lines.extend(["预处理", result_dir])
+    if preprocess_input is not None and not any(line.strip() == "预处理输入" for line in lines):
+        out_lines.extend(["预处理输入", preprocess_input])
+
+    with open(target_file, "w", encoding="utf-8") as f:
+        f.write("\n".join(out_lines))
+
 # ============================================================
 # 执行单个步骤
 # ============================================================
@@ -83,6 +123,23 @@ def run_step(name, script):
         sys.exit(1)
     print(f"\n✅ {name} 完成")
 
+
+def build_processed_save_folder(result_dir, raw_dir):
+    raw_dir_norm = raw_dir.rstrip('/\\')
+    raw_parent_dir = os.path.dirname(raw_dir_norm)
+    raw_second_last = os.path.basename(raw_parent_dir)
+    raw_last = os.path.basename(raw_dir_norm)
+    if raw_second_last:
+        return os.path.join(result_dir, f"{raw_second_last}_processed", raw_last)
+    return result_dir
+
+
+def build_preprocess_input_folder(raw_dir):
+    raw_dir_norm = raw_dir.rstrip('/\\')
+    parent_dir = os.path.dirname(raw_dir_norm)
+    folder_name = os.path.basename(raw_dir_norm)
+    return os.path.join(parent_dir, folder_name + "_cleaned", "kept_spectra")
+
 # ============================================================
 # 主流程
 # ============================================================
@@ -95,33 +152,37 @@ if __name__ == "__main__":
     target_file, raw_dir, result_dir = read_target()
 
     # 异常值.py 的输出路径（和异常值.py内部逻辑保持一致）
-    cleaned_dir = os.path.join(raw_dir.rstrip("/\\") + "_cleaned", "kept_spectra")
+    parent_dir = os.path.dirname(raw_dir.rstrip("/\\"))
+    folder_name = os.path.basename(raw_dir.rstrip("/\\"))
+    cleaned_dir = os.path.join(parent_dir, folder_name + "_cleaned", "kept_spectra")
 
     print(f"\n   原始数据路径：{raw_dir}")
     print(f"   筛选输出路径：{cleaned_dir}  ← 自动推算")
-    print(f"   预处理结果路径：{result_dir}")
+    print(f"   读取 target.txt 中 预处理 路径：{result_dir}")
+    output_save_folder = build_processed_save_folder(result_dir, raw_dir)
+    print(f"   实际最终保存目录：{output_save_folder}  ← 自动生成")
 
     # ── Step 1：异常值筛选 ──────────────────────────────────
     # target写入：异常值 + 原始数据路径
-    write_target(target_file, ["异常值", raw_dir])
+    update_target_paths(target_file, raw_dir=raw_dir)
     run_step("Step 1：异常值筛选", OUTLIER_SCRIPT)
 
+    # Step1 完成后，确保 target.txt 中包含预处理读取路径
+    preprocess_input = build_preprocess_input_folder(raw_dir)
+    update_target_paths(target_file, preprocess_input=preprocess_input)
+    print(f"   预处理读取路径已写入 target.txt: {preprocess_input}")
+
     # ── Step 2：预处理 ──────────────────────────────────────
-    # target写入：预处理 + cleaned路径 + 结果保存路径
-    # pipeline自动把cleaned路径填进去，两个脚本分开用时不受影响
-    write_target(target_file, ["预处理", cleaned_dir, result_dir])
+    # target.txt 中“预处理”标签只保持最终结果保存路径
+    # 读取数据路径来自预处理输入路径（预处理输入）或由异常值原始路径派生
+    update_target_paths(target_file, result_dir=result_dir)
     run_step("Step 2：预处理（基线校正 + 去噪 + 归一化）", PREPROCESS_SCRIPT)
 
     # ── 流水线结束，恢复 target.txt 为原始格式 ────────────────
-    # 方便下次直接改路径重跑，不用重新写格式
-    write_target(target_file, [
-        "异常值",
-        raw_dir,
-        "预处理",
-        result_dir
-    ])
+    # 只修改异常值和预处理标签后的路径，保留其他标签及内容不变
+    update_target_paths(target_file, raw_dir=raw_dir, result_dir=result_dir)
     print(f"\n{'='*55}")
     print(f"🎉  全部完成！")
-    print(f"    最终结果保存在：{result_dir}")
+    print(f"    最终结果保存在：{output_save_folder}")
     print(f"    target.txt 已恢复为原始格式，下次直接改路径重跑即可")
     print(f"{'='*55}")

@@ -15,18 +15,38 @@ warnings.filterwarnings('ignore')
 # 0. 配置：修改路径和类别名称
 # ─────────────────────────────────────────────
 DATA_DIRS = {
-    "0hRAW":   r"D:\aaaSCNU\0data\Raman\EDA\0hRAW\1200",
-    "24hFoam": r"D:\aaaSCNU\0data\Raman\EDA\24hfoam\1200",
-    "48hFoam": r"D:\aaaSCNU\0data\Raman\EDA\48hfoam\1200",
+    "Mac":   r"D:\aaaSCNU\0data\Raman\0处理\预处理processed\000_0hRaw_processed\1200",
+    "Foam": r"D:\aaaSCNU\0data\Raman\0处理\预处理processed\000_24hFoam_processed\1200",
+    "Ra": r"D:\aaaSCNU\0data\Raman\0处理\预处理processed\8hRa_processed\1200",
+    "HP-CD": r"D:\aaaSCNU\0data\Raman\0处理\预处理processed\8hHP-CD_processed\1200",
 }
-SAMPLE_COUNTS = {"0hRAW": 1017, "24hFoam": 1342, "48hFoam": 1500}
 
-COLORS  = {"0hRAW": "#378ADD", "24hFoam": "#1D9E75", "48hFoam": "#D85A30"}
-ALPHAS  = {"0hRAW": 0.15,      "24hFoam": 0.12,      "48hFoam": 0.10}
+COLORS = {
+    "Mac": "#378ADD", "Foam": "#1D9E75", "Ra": "#8E5DB7", "HP-CD": "#D85A30"
+}
+
+ALPHAS = {
+    "Mac": 0.15, "Foam": 0.12, "Ra": 0.12, "HP-CD": 0.12
+}
 OUTPUT  = r"D:\aaaSCNU\0data\Raman\EDA\eda_results"
 
 import os
 os.makedirs(OUTPUT, exist_ok=True)
+
+
+def save_csv_with_fallback(df, filename, output_dir=OUTPUT):
+    """优先写入指定目录；若权限受限则回退到工作区 output 目录。"""
+    os.makedirs(output_dir, exist_ok=True)
+    target_path = os.path.join(output_dir, filename)
+    try:
+        df.to_csv(target_path, index=False)
+        return target_path
+    except PermissionError:
+        fallback_dir = os.path.join(os.getcwd(), "output", "raman_eda_results")
+        os.makedirs(fallback_dir, exist_ok=True)
+        fallback_path = os.path.join(fallback_dir, filename)
+        df.to_csv(fallback_path, index=False)
+        return fallback_path
 
 plt.rcParams.update({
     "font.family": "DejaVu Sans",
@@ -37,41 +57,126 @@ plt.rcParams.update({
     "savefig.bbox": "tight",
 })
 
+# 放大默认字体（整体放大约 2 倍）
+try:
+    scale = 2.0
+    plt.rcParams['font.size'] = plt.rcParams.get('font.size', 10) * scale
+    plt.rcParams['axes.titlesize'] = plt.rcParams.get('axes.titlesize', 12) * scale
+    plt.rcParams['axes.labelsize'] = plt.rcParams.get('axes.labelsize', 11) * scale
+    plt.rcParams['xtick.labelsize'] = plt.rcParams.get('xtick.labelsize', 10) * scale
+    plt.rcParams['ytick.labelsize'] = plt.rcParams.get('ytick.labelsize', 10) * scale
+    plt.rcParams['legend.fontsize'] = plt.rcParams.get('legend.fontsize', 10) * scale
+except Exception:
+    pass
+
 # ─────────────────────────────────────────────
 # 1. 读取数据
 # ─────────────────────────────────────────────
+def find_file(root_folder, filename):
+    """在根目录下递归查找指定文件。
+    支持目标文件不在同一层级，只要属于该类根目录即可。"""
+    
+
+
+    for dirpath, _, files in os.walk(root_folder):
+
+        if filename in files:
+            print("找到:", os.path.join(dirpath, filename))
+            return os.path.join(dirpath, filename)
+
+    def find_file(root_folder, filename):
+
+        if os.path.isfile(root_folder) and \
+            os.path.basename(root_folder) == filename:
+            return root_folder
+
+        for dirpath, _, files in os.walk(root_folder):
+            if filename in files:
+                return os.path.join(dirpath, filename)
+
+        raise FileNotFoundError(
+            f"未找到文件 {filename}，请检查路径: {root_folder}"
+    )
+
+
 def load_statistics(folder):
-    path = os.path.join(folder, "processed_spectra_statistics.txt")
+    path = find_file(folder, "processed_spectra_statistics.txt")
     df = pd.read_csv(path, sep='\t', comment='#',
                      names=["wavenumber", "mean", "std", "variance"])
     return df
 
+
 def load_pca_loadings(folder):
-    path = os.path.join(folder, "pca_loadings.txt")
-    with open(path) as f:
+    path = find_file(folder, "pca_loadings.txt")
+    with open(path, encoding='utf-8') as f:
         header = f.readline().strip().lstrip('#').strip()
     cols = header.split()          # Wavenumber PC1(xx%) PC2...
     df = pd.read_csv(path, sep=r'\s+', comment='#',
                      names=cols, engine='python')
     return df
 
+
 def load_spectra_matrix(folder):
     """读取光谱矩阵，行=波数，列=样本；转置为 样本×波数"""
-    path = os.path.join(folder, "processed_spectra_matrix.txt")
+    path = find_file(folder, "processed_spectra_matrix.txt")
     df = pd.read_csv(path, sep='\t', comment='#', header=None)
     wavenumbers = df.iloc[:, 0].values
     matrix = df.iloc[:, 1:].values.T   # shape: (n_samples, n_wavenumbers)
     return wavenumbers, matrix
 
+def get_sample_count(folder):
+    path = find_file(folder, "processed_spectra_matrix.txt")
+
+    df = pd.read_csv(
+        path,
+        sep="\t",
+        comment="#",
+        nrows=1,
+        header=None
+    )
+
+    # 第一列是波数，所以减1
+    return df.shape[1] - 1
+
 print("读取数据中...")
 stats_dict   = {k: load_statistics(v)   for k, v in DATA_DIRS.items()}
 pca_dict     = {k: load_pca_loadings(v) for k, v in DATA_DIRS.items()}
+sample_counts = {k: get_sample_count(v) for k, v in DATA_DIRS.items()}
 
 # 以第一个类的波数为基准
-wavenumbers = stats_dict["0hRAW"]["wavenumber"].values
-print(f"  波数范围: {wavenumbers[0]:.1f} ~ {wavenumbers[-1]:.1f} cm⁻¹  ({len(wavenumbers)} 点)")
+wavenumbers = stats_dict["Mac"]["wavenumber"].values
+trim_points = 20
+trim_start = trim_points
+trim_end = len(wavenumbers) - trim_points
+wavenumbers_trimmed = wavenumbers[trim_start:trim_end]
+print(f"  原始波数范围: {wavenumbers[0]:.1f} ~ {wavenumbers[-1]:.1f} cm⁻¹  ({len(wavenumbers)} 点)")
+print(f"  裁剪后波数范围: {wavenumbers_trimmed[0]:.1f} ~ {wavenumbers_trimmed[-1]:.1f} cm⁻¹  ({len(wavenumbers_trimmed)} 点)")
 for k, df in stats_dict.items():
     print(f"  {k}: mean 范围 [{df['mean'].min():.3f}, {df['mean'].max():.3f}]")
+
+# ─────────────────────────────────────────────
+# 1.5. 输出汇总统计和绘图数据
+# ─────────────────────────────────────────────
+print("\n导出组统计汇总和绘图数据...")
+summary_rows = []
+for group_name, df in stats_dict.items():
+    summary_rows.append(pd.DataFrame({
+        "group": group_name,
+        "wavenumber_cm-1": df["wavenumber"].values,
+        "mean": df["mean"].values,
+        "std": df["std"].values,
+        "variance": df["variance"].values,
+    }))
+
+summary_df = pd.concat(summary_rows, ignore_index=True)
+summary_df["cv_percent"] = np.where(
+    np.abs(summary_df["mean"]) > 1e-12,
+    summary_df["std"] / np.abs(summary_df["mean"]) * 100,
+    np.nan,
+)
+summary_df = summary_df[["group", "wavenumber_cm-1", "mean", "std", "variance", "cv_percent"]]
+summary_csv = save_csv_with_fallback(summary_df, "group_statistics_summary.csv")
+print(f"  已保存 {summary_csv}")
 
 # ─────────────────────────────────────────────
 # 2. 图1：均值光谱 + 置信带
@@ -91,29 +196,40 @@ for name, df in stats_dict.items():
                     alpha=ALPHAS[name], zorder=2)
 
 ax.set_xlabel("")
-ax.set_ylabel("Normalized intensity", fontsize=11)
-ax.set_title("Mean Raman spectra (±1 SD) — three classes", fontsize=13, fontweight='500')
-ax.legend(fontsize=10, framealpha=0.3)
-ax.set_xlim(wavenumbers[0], wavenumbers[-1])
+ax.set_ylabel("Normalized intensity", fontsize=13)
+ax.set_title("Mean Raman spectra (±1 SD) — four classes", fontsize=15, fontweight='500')
+ax.legend(fontsize=12, framealpha=0.3)
+ax.set_xlim(wavenumbers_trimmed[0], 1800)
 
 # 差值曲线（下图）
 ax2 = axes[1]
-pairs = [("0hRAW","24hFoam"), ("0hRAW","48hFoam"), ("24hFoam","48hFoam")]
-pair_colors = ["#534AB7", "#993C1D", "#888780"]
-for (a, b), col in zip(pairs, pair_colors):
+from itertools import combinations
+
+from itertools import combinations
+
+pairs = list(combinations(DATA_DIRS.keys(), 2))
+
+for a, b in pairs:
     diff = stats_dict[a]["mean"].values - stats_dict[b]["mean"].values
-    ax2.plot(wavenumbers, diff, color=col, lw=0.9,
-             label=f"{a} − {b}", alpha=0.85)
+
+    ax2.plot(
+        wavenumbers,
+        diff,
+        lw=0.9,
+        alpha=0.85,
+        label=f"{a} - {b}"
+    )
+
 ax2.axhline(0, color="gray", lw=0.6, ls="--")
-ax2.set_xlabel("Wavenumber (cm⁻¹)", fontsize=11)
-ax2.set_ylabel("Δ intensity", fontsize=10)
-ax2.legend(fontsize=9, framealpha=0.3)
-ax2.set_xlim(wavenumbers[0], wavenumbers[-1])
+ax2.set_xlabel("Wavenumber (cm⁻¹)", fontsize=13)
+ax2.set_ylabel("Δ intensity", fontsize=12)
+ax2.legend(fontsize=11, framealpha=0.3)
+ax2.set_xlim(wavenumbers_trimmed[0], 1800)
 
 plt.tight_layout()
-plt.savefig(os.path.join(OUTPUT, "fig1_mean_spectra.png"))
+plt.savefig(os.path.join(OUTPUT, "fig1_mean_spectra.svg"))
 plt.close()
-print("  已保存 fig1_mean_spectra.png")
+print("  已保存 fig1_mean_spectra.svg")
 
 # ─────────────────────────────────────────────
 # 3. 图2：逐波数 ANOVA F值 + 差异显著性掩膜
@@ -153,11 +269,39 @@ def pointwise_anova_from_stats(stats_list, n_list):
     return F_arr, p_arr
 
 stat_list = [stats_dict[k] for k in DATA_DIRS]
-n_list    = [SAMPLE_COUNTS[k] for k in DATA_DIRS]
+n_list    = [sample_counts[k] for k in DATA_DIRS]
 F_vals, p_vals = pointwise_anova_from_stats(stat_list, n_list)
 
 sig_mask  = p_vals < 0.05    # Bonferroni 校正可改为 0.05/1015
 print(f"  显著差异波数点 (p<0.05): {sig_mask.sum()} / {len(sig_mask)}")
+
+means_matrix = np.array([stats_dict[k]["mean"].values for k in DATA_DIRS])
+between_var  = np.var(means_matrix, axis=0)
+within_mean_var = np.mean([stats_dict[k]["variance"].values for k in DATA_DIRS], axis=0)
+ratio = between_var / (within_mean_var + 1e-10)
+
+plot_data_df = pd.DataFrame({
+    "wavenumber_cm-1": wavenumbers,
+    "anova_F": F_vals,
+    "anova_p": p_vals,
+    "neg_log10_p": -np.log10(np.clip(p_vals, 1e-300, 1)),
+    "sig_p_0.05": sig_mask.astype(int),
+    "between_class_variance": between_var,
+    "within_class_mean_variance": within_mean_var,
+    "variance_ratio": ratio,
+})
+for group_name in DATA_DIRS:
+    df = stats_dict[group_name]
+    plot_data_df[f"{group_name}_mean"] = df["mean"].values
+    plot_data_df[f"{group_name}_std"] = df["std"].values
+    plot_data_df[f"{group_name}_variance"] = df["variance"].values
+    plot_data_df[f"{group_name}_cv_percent"] = np.where(
+        np.abs(df["mean"].values) > 1e-12,
+        df["std"].values / np.abs(df["mean"].values) * 100,
+        np.nan,
+    )
+plot_data_csv = save_csv_with_fallback(plot_data_df, "plotting_data_summary.csv")
+print(f"  已保存 {plot_data_csv}")
 
 fig, axes = plt.subplots(3, 1, figsize=(14, 10),
                          gridspec_kw={"height_ratios": [2, 1, 0.5]})
@@ -166,8 +310,8 @@ fig, axes = plt.subplots(3, 1, figsize=(14, 10),
 ax = axes[0]
 ax.plot(wavenumbers, F_vals, color="#378ADD", lw=0.8, alpha=0.85)
 ax.set_ylabel("F statistic", fontsize=11)
-ax.set_title("Pointwise one-way ANOVA across three classes", fontsize=13, fontweight='500')
-ax.set_xlim(wavenumbers[0], wavenumbers[-1])
+ax.set_title("Pointwise one-way ANOVA across four classes", fontsize=13, fontweight='500')
+ax.set_xlim(wavenumbers_trimmed[0], 1800)
 
 # -log10(p)
 ax2 = axes[1]
@@ -175,24 +319,24 @@ log_p = -np.log10(np.clip(p_vals, 1e-300, 1))
 ax2.plot(wavenumbers, log_p, color="#D85A30", lw=0.8, alpha=0.85)
 ax2.axhline(-np.log10(0.05), color="gray", lw=0.8, ls="--",
             label="p=0.05")
-ax2.set_ylabel("−log₁₀(p)", fontsize=11)
-ax2.legend(fontsize=9)
-ax2.set_xlim(wavenumbers[0], wavenumbers[-1])
+ax2.set_ylabel("−log₁₀(p)", fontsize=13)
+ax2.legend(fontsize=11)
+ax2.set_xlim(wavenumbers_trimmed[0], 1800)
 
 # 显著性掩膜条带
 ax3 = axes[2]
 ax3.fill_between(wavenumbers, 0, sig_mask.astype(float),
                  color="#1D9E75", alpha=0.7, step='mid')
-ax3.set_ylabel("Sig.", fontsize=10)
-ax3.set_xlabel("Wavenumber (cm⁻¹)", fontsize=11)
+ax3.set_ylabel("Sig.", fontsize=12)
+ax3.set_xlabel("Wavenumber (cm⁻¹)", fontsize=13)
 ax3.set_ylim(0, 1.2)
-ax3.set_xlim(wavenumbers[0], wavenumbers[-1])
+ax3.set_xlim(wavenumbers_trimmed[0], 1800)
 ax3.set_yticks([])
 
 plt.tight_layout()
-plt.savefig(os.path.join(OUTPUT, "fig2_anova.png"))
+plt.savefig(os.path.join(OUTPUT, "fig2_anova.svg"))
 plt.close()
-print("  已保存 fig2_anova.png")
+print("  已保存 fig2_anova.svg")
 
 # ─────────────────────────────────────────────
 # 4. 图3：PCA 载荷对比
@@ -211,16 +355,16 @@ for pc_idx, (ax, pc_label) in enumerate(zip(axes, ["PC1", "PC2"])):
         ax.plot(wn, df[pc_col].values, color=COLORS[name],
                 lw=1.0, label=f"{name}  {pc_col}", alpha=0.85)
     ax.axhline(0, color="gray", lw=0.5, ls="--")
-    ax.set_ylabel(f"{pc_label} loading", fontsize=11)
-    ax.legend(fontsize=9, framealpha=0.3)
-    ax.set_xlim(wavenumbers[0], wavenumbers[-1])
+    ax.set_ylabel(f"{pc_label} loading", fontsize=13)
+    ax.legend(fontsize=11, framealpha=0.3)
+    ax.set_xlim(wavenumbers_trimmed[0], 1800)
 
-axes[1].set_xlabel("Wavenumber (cm⁻¹)", fontsize=11)
-axes[0].set_title("PCA loadings comparison — PC1 & PC2", fontsize=13, fontweight='500')
+axes[1].set_xlabel("Wavenumber (cm⁻¹)", fontsize=13)
+axes[0].set_title("PCA loadings comparison — PC1 & PC2", fontsize=15, fontweight='500')
 plt.tight_layout()
-plt.savefig(os.path.join(OUTPUT, "fig3_pca_loadings.png"))
+plt.savefig(os.path.join(OUTPUT, "fig3_pca_loadings.svg"))
 plt.close()
-print("  已保存 fig3_pca_loadings.png")
+print("  已保存 fig3_pca_loadings.svg")
 
 # ─────────────────────────────────────────────
 # 5. 图4：类内方差 vs 类间方差
@@ -239,15 +383,15 @@ between_var  = np.var(means_matrix, axis=0)
 ax.plot(wavenumbers, between_var, color="black", lw=1.2,
         ls="--", label="Between-class variance", zorder=5)
 
-ax.set_xlabel("Wavenumber (cm⁻¹)", fontsize=11)
-ax.set_ylabel("Variance", fontsize=11)
-ax.set_title("Within-class variance vs between-class variance", fontsize=13, fontweight='500')
-ax.legend(fontsize=9, framealpha=0.3)
-ax.set_xlim(wavenumbers[0], wavenumbers[-1])
+ax.set_xlabel("Wavenumber (cm⁻¹)", fontsize=13)
+ax.set_ylabel("Variance", fontsize=13)
+ax.set_title("Within-class variance vs between-class variance", fontsize=15, fontweight='500')
+ax.legend(fontsize=11, framealpha=0.3)
+ax.set_xlim(wavenumbers_trimmed[0], 1800)
 plt.tight_layout()
-plt.savefig(os.path.join(OUTPUT, "fig4_variance.png"))
+plt.savefig(os.path.join(OUTPUT, "fig4_variance.svg"))
 plt.close()
-print("  已保存 fig4_variance.png")
+print("  已保存 fig4_variance.svg")
 
 # ─────────────────────────────────────────────
 # 6. 输出：关键差异波数列表
@@ -294,20 +438,20 @@ for name, df in stats_dict.items():
     ax.plot(df["wavenumber"], df["mean"],
             color=COLORS[name], lw=1.2, label=name, zorder=3)
 
-ax.set_xlabel("Wavenumber (cm⁻¹)", fontsize=11)
-ax.set_ylabel("Normalized intensity", fontsize=11)
-ax.set_title("Key discriminative wavenumbers (highlighted)", fontsize=13, fontweight='500')
-ax.legend(fontsize=10, framealpha=0.3)
-ax.set_xlim(wavenumbers[0], wavenumbers[-1])
+ax.set_xlabel("Wavenumber (cm⁻¹)", fontsize=13)
+ax.set_ylabel("Normalized intensity", fontsize=13)
+ax.set_title("Key discriminative wavenumbers (highlighted)", fontsize=15, fontweight='500')
+ax.legend(fontsize=12, framealpha=0.3)
+ax.set_xlim(wavenumbers_trimmed[0], 1800)
 plt.tight_layout()
-plt.savefig(os.path.join(OUTPUT, "fig5_key_wavenumbers.png"))
+plt.savefig(os.path.join(OUTPUT, "fig5_key_wavenumbers.svg"))
 plt.close()
-print("  已保存 fig5_key_wavenumbers.png")
+print("  已保存 fig5_key_wavenumbers.svg")
 
 print("\n✓ EDA 完成！所有结果保存在:", OUTPUT)
-print("  fig1_mean_spectra.png   — 均值光谱 + 差分曲线")
-print("  fig2_anova.png          — 逐波数 ANOVA")
-print("  fig3_pca_loadings.png   — PCA 载荷对比")
-print("  fig4_variance.png       — 类内/类间方差")
-print("  fig5_key_wavenumbers.png — 关键波数高亮")
+print("  fig1_mean_spectra.svg   — 均值光谱 + 差分曲线")
+print("  fig2_anova.svg          — 逐波数 ANOVA")
+print("  fig3_pca_loadings.svg   — PCA 载荷对比")
+print("  fig4_variance.svg       — 类内/类间方差")
+print("  fig5_key_wavenumbers.svg — 关键波数高亮")
 print("  key_wavenumbers.csv     — 差异显著波数列表")

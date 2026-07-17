@@ -65,19 +65,57 @@ if target_file is None:
         if target_file:
             break
 
+
+def update_target_path(target_file, tag, path):
+    if target_file is None or not os.path.isfile(target_file):
+        return
+    with open(target_file, 'r', encoding='utf-8') as f:
+        lines = [line.rstrip('\n') for line in f.readlines()]
+
+    updated = False
+    out_lines = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line == tag:
+            updated = True
+            out_lines.append(line)
+            if i + 1 < len(lines):
+                out_lines.append(path)
+                i += 2
+                continue
+            else:
+                out_lines.append(path)
+                i += 1
+                continue
+        out_lines.append(line)
+        i += 1
+
+    if not updated:
+        # 如果没有该标签，则追加到文件末尾
+        out_lines.extend([tag, path])
+
+    with open(target_file, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(out_lines))
+
 folder = None
 task_label = None
 if target_file is not None:
     with open(target_file, "r", encoding="utf-8") as f:
         lines = [line.strip() for line in f.readlines() if line.strip()]
     
-    # 查找"异常值"标签及其下一行
+    TASK_TAG = "异常值"
+
     for i, line in enumerate(lines):
-        if "异常值" in line:
+        if line == TASK_TAG:
             task_label = line
-            # 获取下一行作为读取路径
-            if i + 1 < len(lines):
-                folder = lines[i + 1]
+
+            if i + 1 >= len(lines):
+                raise RuntimeError(
+                    f"❌ 标签 [{TASK_TAG}] 后缺少路径"
+                )
+
+            folder = lines[i + 1]
             break
     
     # 若未找到"异常值"，则按旧格式处理
@@ -112,6 +150,10 @@ output_folder = os.path.join(parent_dir, folder_name + "_cleaned")
 os.makedirs(output_folder, exist_ok=True)
 print(f"📁 读取路径：{folder}")
 print(f"📁 输出文件夹：{output_folder}\n")
+
+# 将异常值输出路径写入 target.txt，作为预处理读取路径
+update_target_path(target_file, "预处理输入", output_folder)
+print(f"🔧 已将预处理读取路径写入 target.txt: {output_folder}\n")
 
 # ── 剔除阈值（可按需调整）──────────────────────────────────
 # [1] 宇宙射线：单点强度超过相邻均值的倍数
@@ -192,8 +234,9 @@ def airPLS_baseline(spectra, lam=1e4, porder=0.005, itermax=8):  # itermax改成
         corrected.append(signal - baseline)
     return np.array(corrected)
 
-spectra = airPLS_baseline(spectra)
-print(f"   → 基线校正完成，进入筛选流程")
+spectra_raw = spectra.copy()  # 保留原始谱，用于最终输出
+spectra = airPLS_baseline(spectra)  # 基线校正谱仅用于筛选
+print(f"   → 基线校正完成，进入筛选流程（原始谱已备份，输出时将使用原始谱）")
 
 # ============================================================
 # 2. 四重过滤
@@ -311,7 +354,8 @@ with open(log_path, "w", encoding="utf-8") as f:
 print(f"\n💾 剔除记录已保存: {log_path}")
 
 # 4b. 干净数据矩阵（每行一条谱，第一列为波数）
-clean_spectra = spectra[keep_idx]
+# 注意：保存原始谱（未做基线校正），基线校正交给后续预处理脚本完成
+clean_spectra = spectra_raw[keep_idx]
 clean_labels  = labels[keep_idx]
 clean_matrix  = np.column_stack([wavenumber, clean_spectra.T])
 
