@@ -1,0 +1,116 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import io
+import os
+
+# ---------------- 1. 读取并清洗数据 ----------------
+# 将您提供的数据作为字符串读入（您也可以根据注释改为从Excel读取）
+data_text = """
+1449.31	0.93156	0.2903
+1656.6	1.64871	0.47438
+比值		
+1449.36	1.27896	0.47616
+1656.65	2.13767	0.70372
+比值		
+1447.45	1.34157	0.38584
+1656.4	2.23026	0.46918
+比值		
+1449.21	1.5688	0.36772
+1656.5	2.59089	0.49972
+比值
+"""
+
+# 逐行解析数据
+lines = [line.split() for line in data_text.strip().split('\n') if line.strip()]
+
+parsed_data = []
+group_idx = 1
+
+# 每3行为一组进行循环
+for i in range(0, len(lines), 3):
+    # 解析参数1 (约等于1449)
+    val_1449 = float(lines[i][1])
+    err_1449 = float(lines[i][2]) # 假设这里是标准差(SD)
+    
+    # 解析参数2 (约等于1656)
+    val_1656 = float(lines[i+1][1])
+    err_1656 = float(lines[i+1][2])
+    
+    # 自动计算比值 (1656 / 1449)
+    ratio_val = val_1656 / val_1449
+    
+    # 根据误差传递公式计算比值的误差 (假设原数据第三列是标准差)
+    # 公式：σ_R = R * sqrt((σ_1/μ_1)^2 + (σ_2/μ_2)^2)
+    ratio_err = ratio_val * np.sqrt((err_1449/val_1449)**2 + (err_1656/val_1656)**2)
+    
+    # 存入列表，统一命名参数名以保证颜色一致
+    parsed_data.append({'Group': f'Group {group_idx}', 'Parameter': 'Peak ~1449', 'Value': val_1449, 'Error': err_1449})
+    parsed_data.append({'Group': f'Group {group_idx}', 'Parameter': 'Peak ~1656', 'Value': val_1656, 'Error': err_1656})
+    parsed_data.append({'Group': f'Group {group_idx}', 'Parameter': 'Ratio (1656/1449)', 'Value': ratio_val, 'Error': ratio_err})
+    
+    group_idx += 1
+
+df = pd.DataFrame(parsed_data)
+# 重新命名每个组为 Mac、Foam、Rapa、HP-CD
+new_group_names = ['Mac', 'Foam', 'Rapa', 'HP-CD']
+df['Group'] = df['Group'].map(lambda x: new_group_names[int(x.split()[-1]) - 1])
+
+# ---------------- 2. 开始绘制分组柱状图 ----------------
+# 设置中文字体（可选）
+# plt.rcParams['font.sans-serif'] = ['SimHei']
+
+fig = plt.figure(figsize=(5.5, 5), constrained_layout=True)
+gs = fig.add_gridspec(1, 2, width_ratios=[3, 2], wspace=0.05)
+ax = fig.add_subplot(gs[0, 0])
+legend_ax = fig.add_subplot(gs[0, 1])
+legend_ax.axis('off')
+
+# 获取唯一的组别和参数类别
+groups = df['Group'].unique()
+params = df['Parameter'].unique()
+
+# 设置柱子的位置和宽度
+x = np.arange(len(groups))  # 组别中心位置 [0, 1, 2, 3]
+width = 0.25                # 柱子宽度
+multiplier = -1             # 用于偏移柱子位置
+
+# 为三个参数设定莫兰迪科研配色
+colors = ["#69B7FA", "#83B9FF", "#94DDFD"]
+
+for idx, param in enumerate(params):
+    # 提取当前参数在所有组的数据
+    subset = df[df['Parameter'] == param]
+    
+    # 计算当前柱子的横向偏移量
+    offset = width * multiplier
+    
+    # 绘制柱子
+    bars = ax.bar(x + offset, subset['Value'], width, 
+                  label=param, color=colors[idx], edgecolor='black', alpha=0.9)
+    
+    multiplier += 1
+
+# ---------------- 3. 图表格式化 ----------------
+ax.set_title('Group Comparison: Peaks & Ratio', fontsize=16, pad=20)
+ax.set_ylabel('Value', fontsize=14)
+ax.set_xlabel('Sample Groups', fontsize=14)
+
+# 将X轴标签设置在每组的中间位置
+ax.set_xticks(x)
+ax.set_xticklabels(groups, fontsize=12)
+
+# 添加图例并去掉网格线
+handles, labels = ax.get_legend_handles_labels()
+legend_ax.legend(handles, labels, loc='upper left', bbox_to_anchor=(0.02, 0.98), frameon=False, fontsize=12, title='Parameters')
+
+# 调整布局并保存 SVG
+fig.tight_layout()
+output_dir = r"D:\aaaSCNU\0data\Raman\EDA\eda_results"
+os.makedirs(output_dir, exist_ok=True)
+output_path = os.path.join(output_dir, 'grouped_bar_chart.svg')
+fig.savefig(output_path, format='svg', dpi=300, transparent=True)
+print(f'Saved SVG to {output_path}')
+
+# 显示图表
+plt.show()

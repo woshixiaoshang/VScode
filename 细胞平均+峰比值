@@ -1,0 +1,344 @@
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.interpolate import interp1d
+import re
+import time
+
+try:
+    import openpyxl  # noqa: F401
+except ImportError:
+    openpyxl = None
+
+
+def clean_filename(filename):
+    """清理文件名中的特殊字符和坐标信息"""
+    cleaned = re.sub(r'__X[^_]+__Y[^_]+__ElapsedTime_\d+', '', filename)
+    cleaned = re.sub(r'[^\w.-]', '', cleaned)
+    return cleaned.split('.txt')[0] + '.txt' if cleaned.endswith('.txt') else cleaned
+
+def extract_wxd_id(filename):
+    """提取 wxd 和 .tmp 之间的 wxd 编号"""
+    m = re.search(r'wxd(.*?)\.tmp', filename, re.IGNORECASE)
+    if m:
+        segment = m.group(1)
+        inner = re.search(r'wxd([A-Za-z0-9]{2,4})', segment, re.IGNORECASE)
+        if inner:
+            return inner.group(1).upper()
+
+    m = re.search(r'wxd([A-Za-z0-9]{2,4})', filename, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    return None
+
+def get_sample_name(sample_path, root_folder):
+    """根据样本路径生成样本名"""
+    if os.path.isfile(sample_path):
+        return os.path.splitext(os.path.basename(sample_path))[0]
+    if os.path.isdir(sample_path):
+        return os.path.basename(sample_path)
+    return os.path.basename(sample_path)
+
+
+def process_sample(sample_path, root_folder, global_data_collector, ratio_stats_collector, peak1, peak2, window, sample_name=None):
+    """处理单个样本的数据：收集所有txt、计算每条谱的峰比值并求细胞均值方差、最后计算光谱均值"""
+    if isinstance(sample_path, list):
+        file_paths = sorted(sample_path)
+        if sample_name is None:
+            sample_name = extract_wxd_id(os.path.basename(file_paths[0]))
+        if sample_name is None:
+            sample_name = os.path.splitext(os.path.basename(file_paths[0]))[0]
+        print(f"  样本 {sample_name} 包含 {len(file_paths)} 个txt")
+    elif os.path.isdir(sample_path):
+        if sample_name is None:
+            sample_name = os.path.basename(sample_path)
+        txt_files = sorted(f for f in os.listdir(sample_path) if f.lower().endswith(".txt"))
+        if not txt_files:
+            print(f"跳过空文件夹: {sample_path}")
+            return None
+        file_paths = [os.path.join(sample_path, f) for f in txt_files]
+        print(f"  样本 {sample_name} 包含 {len(file_paths)} 个txt")
+    else:
+        if sample_name is None:
+            sample_name = os.path.splitext(os.path.basename(sample_path))[0]
+        file_paths = [sample_path]
+        print(f"  样本 {sample_name} 包含1个txt")
+
+    raman_shifts, counts_list = [], []
+
+    # 1. 读取单谱数据
+    for idx, file_path in enumerate(file_paths, 1):
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                lines = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+
+                data_lines = []
+                for line in lines:
+                    parts = re.split(r'[\s,;|]+', line)
+                    if len(parts) >= 2 and all(re.match(r'^-?\d*\.?\d+$', p) for p in parts[:2]):
+                        data_lines.append(parts[:2])
+
+            if len(data_lines) < 2:
+                continue
+
+            df = pd.DataFrame(data_lines, columns=['Raman shift', 'Counts']).astype(float)
+            raman_shifts.append(df['Raman shift'].values)
+            counts_list.append(df['Counts'].values)
+
+        except Exception as e:
+            print(f"文件 {clean_filename(os.path.basename(file_path))} 读取失败: {str(e)[:100]}")
+            continue
+
+        if idx % 500 == 0 or idx == len(file_paths):
+            print(f"    已处理 {idx}/{len(file_paths)} 个文件")
+
+    if not counts_list:
+        print(f"警告：样本 {sample_name} 无有效数据")
+        return None
+
+    # ================= 新增：针对【每条单谱】计算峰强度比值 =================
+    ratios = []
+    for shift, counts in zip(raman_shifts, counts_list):
+        # 检索峰1周围
+        mask1 = (shift >= peak1 - window) & (shift <= peak1 + window)
+        # 检索峰2周围
+        mask2 = (shift >= peak2 - window) & (shift <= peak2 + window)
+
+        if np.any(mask1) and np.any(mask2):
+            p1_max = np.max(counts[mask1])
+            p2_max = np.max(counts[mask2])
+            
+            if p2_max != 0 and not np.isnan(p1_max) and not np.isnan(p2_max):
+                ratios.append(p1_max / p2_max)
+
+    # 计算该细胞内所有单谱比值的：平均值、方差
+    if ratios:
+        mean_ratio = np.mean(ratios)
+        # 样本方差 (ddof=1), 如果只有1条谱则方差为 0
+        var_ratio = np.var(ratios, ddof=1) if len(ratios) > 1 else 0.0
+        std_ratio = np.std(ratios, ddof=1) if len(ratios) > 1 else 0.0
+    else:
+        mean_ratio, var_ratio, std_ratio = np.nan, np.nan, np.nan
+
+    ratio_stats_collector.append({
+        'Sample/Cell': sample_name,
+        'Valid Spectra Count': len(ratios),
+        'Target Peak 1': peak1,
+        'Target Peak 2': peak2,
+        'Ratio Mean (P1/P2)': mean_ratio,
+        'Ratio Variance': var_ratio,
+        'Ratio Std': std_ratio
+    })
+    # ====================================================================
+
+    # 2. 插值并计算全波段的细胞平均谱 (原有逻辑)
+    try:
+        all_shifts = np.concatenate(raman_shifts)
+        shift_min = max(400, np.floor(np.min(all_shifts)))
+        shift_max = min(2000, np.ceil(np.max(all_shifts)))
+        shift_uniform = np.linspace(shift_min, shift_max, int(shift_max - shift_min + 1))
+    except Exception as e:
+        print(f"计算Raman shift范围失败: {e}")
+        return None
+
+    counts_interpolated = []
+    for shift, counts in zip(raman_shifts, counts_list):
+        try:
+            interp_func = interp1d(shift, counts, kind='nearest', fill_value='extrapolate')
+            counts_interpolated.append(interp_func(shift_uniform))
+        except Exception:
+            continue
+
+    if not counts_interpolated:
+        return None
+
+    sample_mean_counts = np.mean(np.vstack(counts_interpolated), axis=0)
+    global_data_collector.append(pd.DataFrame({
+        'Raman shift': shift_uniform,
+        'Counts': sample_mean_counts,
+        'Source': sample_name
+    }))
+
+    return shift_uniform
+
+
+def generate_global_output(global_data, output_root):
+    """生成全局平均值文件和图表 (原有保存平均谱逻辑)"""
+    if not global_data:
+        print("没有有效光谱数据可处理")
+        return
+
+    all_data = pd.concat(global_data, ignore_index=True)
+
+    global_avg = all_data.groupby('Raman shift')['Counts'].mean().reset_index()
+    global_std = all_data.groupby('Raman shift')['Counts'].std().reset_index()
+
+    output_path = os.path.join(output_root, 'global_average.txt')
+    np.savetxt(
+        output_path,
+        np.column_stack((global_avg['Raman shift'], global_avg['Counts'], global_std['Counts'])),
+        fmt='%.6f',
+        delimiter='\t',
+        header='Raman shift\tAverage\tStd'
+    )
+    print(f"全局平均值已保存到: {output_path}")
+
+    plt.figure(figsize=(12, 7))
+    plt.plot(global_avg['Raman shift'], global_avg['Counts'],
+             'b-', linewidth=2, label='Global Average')
+    plt.fill_between(global_avg['Raman shift'],
+                    global_avg['Counts'] - global_std['Counts'],
+                    global_avg['Counts'] + global_std['Counts'],
+                    color='blue', alpha=0.2, label='±1 Std')
+
+    plt.xlabel('Raman Shift (cm$^{-1}$)', fontsize=14)
+    plt.ylabel('Intensity (a.u.)', fontsize=14)
+    plt.title('Global Average Raman Spectrum', fontsize=16)
+    plt.legend(fontsize=12)
+    plt.grid(linestyle='--', alpha=0.3)
+    plt.tight_layout()
+
+    plot_path = os.path.join(output_root, 'global_average_plot.png')
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    data_path = os.path.join(output_root, 'all_spectra_data.csv')
+    all_data.to_csv(data_path, index=False)
+
+    excel_path = os.path.join(output_root, 'all_sample_mean_spectra.xlsx')
+    try:
+        pivot_df = all_data.pivot(index='Source', columns='Raman shift', values='Counts')
+        pivot_df = pivot_df.transpose()
+        pivot_df.index.name = 'Raman shift'
+        pivot_df.columns.name = 'Source'
+        pivot_df.to_excel(excel_path)
+    except Exception as e:
+        print(f"保存 Excel 失败: {e}")
+
+def generate_ratio_output(ratio_stats, output_root):
+    """生成每个细胞单谱比值特征的平均值与方差文件"""
+    if not ratio_stats:
+        print("没有有效的比值数据可保存")
+        return
+        
+    df_results = pd.DataFrame(ratio_stats)
+    
+    try:
+        output_path = os.path.join(output_root, 'cell_spectra_ratios_analysis.xlsx')
+        df_results.to_excel(output_path, index=False)
+        print(f"单谱峰比值统计结果(均值与方差)已保存到: {output_path}")
+    except Exception:
+        output_path = os.path.join(output_root, 'cell_spectra_ratios_analysis.csv')
+        df_results.to_csv(output_path, index=False, encoding='utf-8-sig')
+        print(f"单谱峰比值统计结果(均值与方差)已保存到: {output_path}")
+
+
+def list_txt_files(folder_path, recursive=False):
+    """列出文件夹中的 txt 文件"""
+    txt_files = []
+    if recursive:
+        for current_root, _, filenames in os.walk(folder_path):
+            for filename in filenames:
+                if filename.lower().endswith(".txt"):
+                    txt_files.append(os.path.join(current_root, filename))
+    else:
+        for filename in os.listdir(folder_path):
+            full_path = os.path.join(folder_path, filename)
+            if os.path.isfile(full_path) and filename.lower().endswith(".txt"):
+                txt_files.append(full_path)
+    return sorted(txt_files)
+
+def build_sample_paths(root_folder, output_root):
+    """递归识别样本"""
+    sample_groups = {}
+    output_root_abs = os.path.abspath(output_root)
+
+    for current_root, dirnames, filenames in os.walk(root_folder):
+        current_root_abs = os.path.abspath(current_root)
+
+        if current_root_abs == output_root_abs or current_root_abs.startswith(output_root_abs + os.sep):
+            dirnames[:] = []
+            continue
+
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if not os.path.abspath(os.path.join(current_root, d)).startswith(output_root_abs + os.sep)
+        )
+
+        folder_name = os.path.basename(current_root)
+
+        if re.fullmatch(r"\d+", folder_name):
+            txt_files = list_txt_files(current_root, recursive=True)
+            if txt_files:
+                sample_groups.setdefault(folder_name, []).extend(txt_files)
+            dirnames[:] = []
+            continue
+
+        for filename in sorted(filenames):
+            if not filename.lower().endswith(".txt"):
+                continue
+
+            full_path = os.path.join(current_root, filename)
+            wxd_id = extract_wxd_id(filename)
+            sample_name = wxd_id if wxd_id is not None else os.path.splitext(filename)[0]
+            sample_groups.setdefault(sample_name, []).append(full_path)
+
+    return [(name, sorted(paths)) for name, paths in sorted(sample_groups.items())]
+
+
+def process_all_folders(root_folder, output_root, peak1, peak2, window):
+    """主处理函数"""
+    os.makedirs(output_root, exist_ok=True)
+    
+    global_data_collector = []
+    ratio_stats_collector = [] # 专门用于收集每个细胞比值的均值和方差
+    
+    sample_paths = build_sample_paths(root_folder, output_root)
+
+    total_samples = len(sample_paths)
+    print(f"找到 {total_samples} 个样本(细胞)，开始处理...")
+
+    for i, (name, sample_path) in enumerate(sample_paths, 1):
+        print(f"处理样本 {i}/{total_samples}: {name}")
+        process_sample(
+            sample_path=sample_path, 
+            root_folder=root_folder, 
+            global_data_collector=global_data_collector, 
+            ratio_stats_collector=ratio_stats_collector,
+            peak1=peak1, 
+            peak2=peak2, 
+            window=window,
+            sample_name=name
+        )
+
+    # 保存常规的光谱平均结果
+    generate_global_output(global_data_collector, output_root)
+    # 保存细胞单谱比值统计结果(均值和方差)
+    generate_ratio_output(ratio_stats_collector, output_root)
+
+
+if __name__ == "__main__":
+    start_time = time.time()
+    
+    # ================= 运行前参数修改区 =================
+    # 输入输出路径
+    input_folder = r"D:\aaaSCNU\0data\Raman\0处理\000_0hRaw_processed\1200\Data"
+    output_folder = os.path.join(input_folder, "分细胞平均结果")
+    
+    # 定义比值所需的两个目标峰位与容差 (根据实际需求调整数值)
+    TARGET_PEAK_1 = 1656    # 需要计算比值的分子(例如 1000 cm-1)
+    TARGET_PEAK_2 = 1444    # 需要计算比值的分母(例如 1440 cm-1)
+    SEARCH_WINDOW = 10      # 检索容差: 在 [目标位-10, 目标位+10] 范围内分别寻找真实最高峰
+    # ===================================================
+
+    process_all_folders(
+        root_folder=input_folder, 
+        output_root=output_folder,
+        peak1=TARGET_PEAK_1,
+        peak2=TARGET_PEAK_2,
+        window=SEARCH_WINDOW
+    )
+
+    end_time = time.time()
+    print(f"\n总耗时: {end_time - start_time:.2f} 秒")

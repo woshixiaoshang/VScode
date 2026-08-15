@@ -50,12 +50,12 @@ class RamanDataProcessor:
         file_paths = []
 
         if has_subfolders:
-            for subfolder in os.listdir(folder_path):
-                subfolder_path = os.path.join(folder_path, subfolder)
-                if os.path.isdir(subfolder_path):
-                    for fname in os.listdir(subfolder_path):
-                        if fname.endswith(".txt"):
-                            file_paths.append((os.path.join(subfolder_path, fname), f"{subfolder}/{fname}"))
+            for root, _, files in os.walk(folder_path):
+                for fname in files:
+                    if fname.endswith(".txt"):
+                        full_path = os.path.join(root, fname)
+                        rel_path = os.path.relpath(full_path, folder_path)
+                        file_paths.append((full_path, rel_path.replace("\\", "/")))
         else:
             for fname in os.listdir(folder_path):
                 if fname.endswith(".txt"):
@@ -573,11 +573,30 @@ class RamanDataProcessor:
             plt.savefig(os.path.join(save_dir, f"{prefix}_Spectra_Preview.png"), dpi=300, bbox_inches='tight')
 
 
-# ======================== 全新 2x3 综合分析画图面板 ======================== #
+# ======================== 全新 2x3 综合分析画图面板（重新设计布局） ======================== #
+def _detect_peaks_adaptive(spectrum, wavenumber, prominence_factor=0.15, distance_factor=0.02):
+    """自适应峰检测"""
+    n = len(spectrum)
+    # 根据数据范围自适应设置参数
+    spectrum_range = spectrum.max() - spectrum.min()
+    prominence = spectrum_range * prominence_factor
+    distance = max(1, int(n * distance_factor))
+    
+    peaks, properties = find_peaks(spectrum, prominence=prominence, distance=distance)
+    
+    if len(peaks) == 0:
+        return np.array([])
+    
+    # 按强度排序，取前 N 个峰
+    peak_heights = spectrum[peaks]
+    top_peaks = peaks[np.argsort(peak_heights)[::-1][:min(10, len(peaks))]]
+    return np.sort(top_peaks)
+
 def plot_comprehensive_dashboard(processor, save_dir=None):
     """
-    取代原有6个独立画图函数，生成一张高整合度的2x3科研面板图。
-    包含：重复性热图、强度热图、平均谱±SD、PCA聚类、PCC矩阵、堆叠谱。
+    重新设计的 2x3 综合分析面板。
+    左列：平均谱±SD（上）+ 强度热图（下）
+    右列：PCA聚类（上）+ PCC矩阵（中）+ 峰位分析（下）
     """
     if processor.processed_data is None:
         return
@@ -587,142 +606,233 @@ def plot_comprehensive_dashboard(processor, save_dir=None):
     filenames = processor.processed_filenames
     n_spec, n_pts = spectra.shape
 
-    # 1. 自动提取分组标签 (如果通过子文件夹加载，则根据子文件夹名称分组)
-    labels = []
-    for fname in filenames:
-        if "/" in fname:
-            labels.append(fname.split("/")[0])
-        elif "\\" in fname:
-            labels.append(fname.split("\\")[0])
-        else:
-            labels.append("All")
-    labels = np.array(labels)
-    unique_groups = list(dict.fromkeys(labels))
-    n_groups = len(unique_groups)
-    group_means = {g: spectra[labels == g].mean(axis=0) for g in unique_groups}
-
-    # 2. 颜色配置
+    # 1. 颜色配置
     raman_cmap = LinearSegmentedColormap.from_list("raman", ["#0d1b2a", "#1f4e79", "#2e86c1", "#27ae60", "#f4d03f", "#e74c3c", "#ffffff"])
     cool_warm = LinearSegmentedColormap.from_list("cool_warm", ["#2980b9", "#ecf0f1", "#c0392b"])
-    group_colors = plt.cm.tab10(np.linspace(0, 0.9, max(1, n_groups)))
-    group_color_map = dict(zip(unique_groups, group_colors))
 
-    # 3. 创建大画布 (2x3)
-    fig = plt.figure(figsize=(18, 11))
+    # 2. 创建大画布 (2x3)
+    fig = plt.figure(figsize=(18, 9))
     fig.patch.set_facecolor("#f7f9fc")
-    gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.42, wspace=0.38, left=0.07, right=0.97, top=0.93, bottom=0.07)
+    gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.3, left=0.05, right=0.98, top=0.93, bottom=0.07)
 
-    ax1 = fig.add_subplot(gs[0, 0])
-    ax2 = fig.add_subplot(gs[0, 1])
-    ax3 = fig.add_subplot(gs[0, 2])
-    ax4 = fig.add_subplot(gs[1, 0])
-    ax5 = fig.add_subplot(gs[1, 1])
-    ax6 = fig.add_subplot(gs[1, 2])
+  # ━━━━━━ 左列：平均谱 + 热图（重新分配为两列：图区 + Colorbar区） ━━━━━━
+    # width_ratios=[30, 1] 意思是图占30份宽度，Colorbar占1份宽度
+    left_gs = gridspec.GridSpecFromSubplotSpec(2, 2, subplot_spec=gs[:, 0], 
+                                               height_ratios=[1, 1.2], width_ratios=[30, 1], 
+                                               hspace=0.0, wspace=0.05)
+    
+    ax1 = fig.add_subplot(left_gs[0, 0])  # 平均谱在左上
+    ax2 = fig.add_subplot(left_gs[1, 0], sharex=ax1)  # 热图在左下
+    cax2 = fig.add_subplot(left_gs[1, 1]) # 专门留给热图 Colorbar 的位置
+    
+    # ━━━━━━ 中列：PCA ━━━━━━
+    ax3 = fig.add_subplot(gs[0, 1])  # PCA聚类 (右上)
+    
+    # ━━━━━━ 右列：PCC ━━━━━━
+    ax4 = fig.add_subplot(gs[1, 1])  # PCC矩阵 (中)
 
     # 注意：imshow 的 extent 设置，自动适应上升或下降的波数
     ext = [wavenumber[0], wavenumber[-1], n_spec, 0]
 
-    # --- 图1: 重复性热图 (归一化后) ---
-    spectra_norm = spectra / (spectra.max(axis=1, keepdims=True) + 1e-10)
-    im1 = ax1.imshow(spectra_norm, aspect="auto", cmap=raman_cmap, extent=ext, interpolation="nearest")
-    ax1.set_xlabel("Raman Shift (cm$^{-1}$)")
-    ax1.set_ylabel("Spectrum Index")
-    ax1.set_title("Reproducibility Heatmap\n(Normalized)", fontsize=11, fontweight="bold")
-    cbar1 = fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
-    cbar1.set_label("Norm. Intensity", fontsize=8)
+    # ─────────────────────────────────────────
+   # 图1: 平均谱 ± 标准差，并标注峰位
+    # ─────────────────────────────────────────
+    mean_spectrum = spectra.mean(axis=0)
+    mean_spec = mean_spectrum
+    std_spec = spectra.std(axis=0)
+    ax1.plot(wavenumber, mean_spec, color="#2c3e50", lw=2, label="Mean")
+    ax1.fill_between(wavenumber, mean_spec - std_spec, mean_spec + std_spec, alpha=0.25, color="#2980b9", label="±1 SD")
 
-    # --- 图2: 强度热图 (原始强度，按均值排序) ---
+    # 获取最大Y值，用来设置Y轴上限，防止文字被遮挡
+    y_max = np.max(mean_spec + std_spec)
+    ax1.set_ylim(bottom=np.min(mean_spec - std_spec), top=y_max * 1.15) # 顶部留白 15%
+
+    peak_color = "#e74c3c"
+    peak_marker_size = 80
+    peak_indices = _detect_peaks_adaptive(mean_spec, wavenumber, prominence_factor=0.12, distance_factor=0.02)
+
+    if len(peak_indices) > 0:
+        peak_wavenumbers = wavenumber[peak_indices]
+        peak_intensities = mean_spec[peak_indices]
+        ax1.scatter(peak_wavenumbers, peak_intensities, color=peak_color, s=peak_marker_size, marker="^",
+                    zorder=5, label=f"Peaks (n={len(peak_indices)})", edgecolors="darkred", linewidths=1.2)
+        for pw, pi in zip(peak_wavenumbers, peak_intensities):
+            ax1.vlines(pw, 0, pi, colors=peak_color, linewidth=0.8, linestyles="--", alpha=0.5)
+            # 改进文字位置：基于绝对高度偏移，并设置 va="bottom"
+            ax1.text(pw, pi + (y_max * 0.03), f"{pw:.0f}", ha="center", va="bottom", fontsize=8,
+                     color=peak_color, fontweight="bold")
+
+    ax1.set_xlabel("Raman Shift (cm$^{-1}$)", fontsize=11)
+    ax1.set_ylabel("Intensity (a.u.)", fontsize=11)
+    ax1.legend(fontsize=10, loc='upper left')
+    ax1.grid(True, alpha=0.2)
+    ax1.set_xlim(wavenumber[0], wavenumber[-1])
+    ax1.margins(x=0)
+    ax1.tick_params(axis='x', bottom=False, labelbottom=False) # 彻底隐藏刻度
+    ax1.spines['bottom'].set_visible(False)                    # 隐藏底线
+
+    # ─────────────────────────────────────────
+    # 图2: 强度热图 (左下) - 按均值排序
+    # ─────────────────────────────────────────
     sort_idx = np.argsort(spectra.mean(axis=1))
     spectra_sorted = spectra[sort_idx]
-    im2 = ax2.imshow(spectra_sorted, aspect="auto", cmap="inferno", extent=ext, interpolation="nearest")
-    ax2.set_xlabel("Raman Shift (cm$^{-1}$)")
-    ax2.set_ylabel("Spectrum (sorted by mean intensity)")
-    ax2.set_title("Intensity Heatmap\n(Raw, sorted)", fontsize=11, fontweight="bold")
-    cbar2 = fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
-    cbar2.set_label("Intensity (a.u.)", fontsize=8)
+    heatmap_cmap = "afmhot"  # 可直接改为 inferno / viridis / plasma / turbo 以调整对比度
+    heatmap_vmin = float(np.percentile(spectra_sorted, 1))
+    heatmap_vmax = float(np.percentile(spectra_sorted, 99))
+    if np.isclose(heatmap_vmin, heatmap_vmax):
+        heatmap_vmin -= 0.5
+        heatmap_vmax += 0.5
+    im2 = ax2.imshow(spectra_sorted, aspect="auto", cmap=heatmap_cmap, vmin=heatmap_vmin, vmax=heatmap_vmax,
+                     extent=ext, interpolation="nearest")
+    ax2.set_xlabel("Raman Shift (cm$^{-1}$)", fontsize=11)
+    ax2.set_ylabel("Spectrum (sorted by intensity)", fontsize=11)
+    ax2.set_xlim(wavenumber[0], wavenumber[-1])
+    ax2.margins(x=0)
+    # ax2.set_title("Intensity Heatmap (Raw, sorted)", fontsize=12, fontweight="bold", pad=8)
+    cbar2 = fig.colorbar(im2, cax=cax2)
+    cbar2.set_label("Intensity (a.u.)", fontsize=10)
+    cbar2.ax.tick_params(labelsize=8)
 
-    # --- 图3: 平均谱 ± 标准差 ---
-    mean_spec, std_spec = spectra.mean(axis=0), spectra.std(axis=0)
-    ax3.plot(wavenumber, mean_spec, color="#2c3e50", lw=1.5, label="Mean")
-    ax3.fill_between(wavenumber, mean_spec - std_spec, mean_spec + std_spec, alpha=0.25, color="#2980b9", label="±1 SD")
-    ax3.set_xlabel("Raman Shift (cm$^{-1}$)")
-    ax3.set_ylabel("Intensity (a.u.)")
-    ax3.set_title("Mean Spectrum ± SD", fontsize=11, fontweight="bold")
-    ax3.legend(fontsize=8)
-
-    # --- 图4: PCA 聚类 ---
+    # ─────────────────────────────────────────
+    # 图3: PCA 聚类 (右上)
+    # ─────────────────────────────────────────
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(spectra)
     pca = PCA(n_components=min(5, n_spec, n_pts))
     scores = pca.fit_transform(X_scaled)
     explained = pca.explained_variance_ratio_ * 100
 
-    for g in unique_groups:
-        mask = labels == g
-        ax4.scatter(scores[mask, 0], scores[mask, 1], label=g, color=group_color_map[g], s=60, alpha=0.8, edgecolors="white", linewidths=0.5)
-        # 添加 95% 置信椭圆 (均值±2σ)
-        if mask.sum() >= 3:
-            cx, cy = scores[mask, 0].mean(), scores[mask, 1].mean()
-            sx, sy = scores[mask, 0].std() * 2, scores[mask, 1].std() * 2
-            theta = np.linspace(0, 2 * np.pi, 100)
-            ax4.plot(cx + sx * np.cos(theta), cy + sy * np.sin(theta), color=group_color_map[g], lw=1, ls="--", alpha=0.5)
+    # 所有数据点用同一颜色 (因为是同一组)
+    ax3.scatter(scores[:, 0], scores[:, 1], color="#3498db", s=80, alpha=0.7, edgecolors="white", linewidths=1)
+    
+    # 添加 95% 置信椭圆
+    if n_spec >= 3:
+        cx, cy = scores[:, 0].mean(), scores[:, 1].mean()
+        sx, sy = scores[:, 0].std() * 2, scores[:, 1].std() * 2
+        theta = np.linspace(0, 2 * np.pi, 100)
+        ax3.plot(cx + sx * np.cos(theta), cy + sy * np.sin(theta), color="#2c3e50", lw=1.5, ls="--", alpha=0.6, label="95% CI")
 
-    ax4.axhline(0, color="gray", lw=0.5, ls=":")
-    ax4.axvline(0, color="gray", lw=0.5, ls=":")
-    ax4.set_xlabel(f"PC1 ({explained[0]:.1f}%)")
-    ax4.set_ylabel(f"PC2 ({explained[1]:.1f}%)" if len(explained) > 1 else "PC2")
-    ax4.set_title("PCA Clustering", fontsize=11, fontweight="bold")
-    if n_groups > 1: ax4.legend(fontsize=8, markerscale=0.9)
+    ax3.axhline(0, color="gray", lw=0.5, ls=":")
+    ax3.axvline(0, color="gray", lw=0.5, ls=":")
+    ax3.set_xlabel(f"PC1 ({explained[0]:.1f}%)", fontsize=11)
+    ax3.set_ylabel(f"PC2 ({explained[1]:.1f}%)" if len(explained) > 1 else "PC2", fontsize=11)
+    ax3.set_title("PCA Clustering", fontsize=13, fontweight="bold")
+    ax3.legend(fontsize=10)
 
-    # --- 图5: PCC 矩阵 ---
+    # ─────────────────────────────────────────
+    # 图4: PCC 矩阵 (中)
+    # ─────────────────────────────────────────
     pcc_matrix = np.corrcoef(spectra)
-    im5 = ax5.imshow(pcc_matrix, cmap=cool_warm, vmin=-1, vmax=1, aspect="auto", interpolation="nearest")
-    cbar5 = fig.colorbar(im5, ax=ax5, fraction=0.046, pad=0.04)
-    cbar5.set_label("Pearson r", fontsize=8)
+    im4 = ax4.imshow(pcc_matrix, cmap=cool_warm, vmin=-1, vmax=1, aspect="auto", interpolation="nearest")
+    cbar4 = fig.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
+    cbar4.set_label("Pearson r", fontsize=9)
+    
     if n_spec <= 20:
         for i in range(n_spec):
             for j in range(n_spec):
-                ax5.text(j, i, f"{pcc_matrix[i,j]:.2f}", ha="center", va="center", fontsize=6, color="black" if abs(pcc_matrix[i,j]) < 0.7 else "white")
-    # 计算剔除自相关(对角线)后的真实平均 PCC 
+                ax4.text(j, i, f"{pcc_matrix[i,j]:.2f}", ha="center", va="center", fontsize=6, 
+                        color="black" if abs(pcc_matrix[i,j]) < 0.7 else "white")
+    
+    # 计算剔除自相关(对角线)后的真实平均 PCC
     mask_off = ~np.eye(n_spec, dtype=bool)
     pcc_vals = pcc_matrix[mask_off]
     
-    # 将平均值和标准差显示在 X 轴标签上
-    ax5.set_xlabel(f"Spectrum Index\nmean PCC = {pcc_vals.mean():.4f} ± {pcc_vals.std():.4f}", fontsize=10)
-    ax5.set_ylabel("Spectrum Index")
-    ax5.set_title("Pearson Correlation\nCoefficient Matrix", fontsize=11, fontweight="bold")
+    ax4.set_xlabel(f"Spectrum Index\nmean PCC = {pcc_vals.mean():.4f} ± {pcc_vals.std():.4f}", fontsize=11)
+    ax4.set_ylabel("Spectrum Index", fontsize=11)
+    ax4.set_title("Pearson Correlation Matrix", fontsize=13, fontweight="bold")
 
-    # --- 图6: 平均谱堆叠 (偏移显示) ---
-    if n_groups > 1:
-        offset_step = max(gm.max() - gm.min() for gm in group_means.values()) * 1.3
-        for i, g in enumerate(unique_groups):
-            gm = group_means[g]
-            offset = i * offset_step
-            ax6.plot(wavenumber, gm + offset, color=group_color_map[g], lw=1.5, label=g)
-            ax6.fill_between(wavenumber, gm + offset - spectra[labels == g].std(axis=0), gm + offset + spectra[labels == g].std(axis=0), alpha=0.15, color=group_color_map[g])
-            ax6.text(max(wavenumber), gm.mean() + offset, f" {g}", fontsize=9, va="center", color=group_color_map[g])
-        ax6.set_title("Stacked Mean Spectra\n(by Group)", fontsize=11, fontweight="bold")
-    else:
-        max_range = (spectra.max(axis=1) - spectra.min(axis=1)).max()
-        offset_step = max_range * 1.1
-        cmap_stack = plt.cm.viridis(np.linspace(0, 1, n_spec))
-        for i, sp in enumerate(spectra):
-            ax6.plot(wavenumber, sp + i * offset_step, color=cmap_stack[i], lw=0.8, alpha=0.85)
-        ax6.set_title("Stacked Individual Spectra", fontsize=11, fontweight="bold")
-    
-    ax6.set_xlabel("Raman Shift (cm$^{-1}$)")
-    ax6.set_ylabel("Intensity (offset, a.u.)")
-    ax6.set_yticks([])
+    fig.suptitle(f"Raman Spectra Comprehensive Analysis  ·  {n_spec} Spectra", fontsize=18, fontweight="bold", y=0.98)
 
-    fig.suptitle(f"Raman Spectra Comprehensive Analysis  ·  {n_spec} Spectra", fontsize=16, fontweight="bold", y=0.98)
+    # 额外输出左侧组合图（单独完整图）
+    # 额外输出左侧组合图（单独完整图）
+    if save_dir:
+        fig_left = plt.figure(figsize=(4, 7))
+        fig_left.patch.set_facecolor("white")
+        
+        # 同样改为 2行2列 布局
+        left_gs_single = gridspec.GridSpec(2, 2, figure=fig_left, 
+                                           height_ratios=[1, 1.2], width_ratios=[30, 1], 
+                                           hspace=0.0, wspace=0.05)
+        ax_left_top = fig_left.add_subplot(left_gs_single[0, 0])
+        ax_left_bottom = fig_left.add_subplot(left_gs_single[1, 0], sharex=ax_left_top)
+        cax_left = fig_left.add_subplot(left_gs_single[1, 1]) # Colorbar 专属位置
+
+        ax_left_top.plot(wavenumber, mean_spec, color="#2c3e50", lw=2, label="Mean")
+        ax_left_top.fill_between(wavenumber, mean_spec - std_spec, mean_spec + std_spec,
+                                 alpha=0.25, color="#2980b9", label="±1 SD")
+        
+        # 同步 Y 轴留白逻辑
+        ax_left_top.set_ylim(bottom=np.min(mean_spec - std_spec), top=y_max * 1.15)
+
+        if len(peak_indices) > 0:
+            ax_left_top.scatter(wavenumber[peak_indices], mean_spec[peak_indices], color=peak_color,
+                                s=peak_marker_size, marker="^", zorder=5, edgecolors="darkred", linewidths=1.2)
+            for pw, pi in zip(wavenumber[peak_indices], mean_spec[peak_indices]):
+                ax_left_top.vlines(pw, 0, pi, colors=peak_color, linewidth=0.8, linestyles="--", alpha=0.5)
+                # 重新添加单独出图时的峰位文字
+                ax_left_top.text(pw, pi + (y_max * 0.03), f"{pw:.0f}", ha="center", va="bottom", fontsize=9,
+                                 color=peak_color, fontweight="bold")
+                
+        ax_left_top.set_ylabel("Intensity (a.u.)", fontsize=11)
+        ax_left_top.grid(True, alpha=0.2)
+        ax_left_top.legend(fontsize=9, loc='upper left')
+        ax_left_top.set_xlim(wavenumber[0], wavenumber[-1])
+        ax_left_top.margins(x=0)
+        
+        # 彻底隐藏上图底部边框
+        ax_left_top.tick_params(axis='x', bottom=False, labelbottom=False)
+        ax_left_top.spines['bottom'].set_visible(False)
+
+        im_left = ax_left_bottom.imshow(spectra_sorted, aspect="auto", cmap=heatmap_cmap, vmin=heatmap_vmin,
+                                        vmax=heatmap_vmax, extent=ext, interpolation="nearest")
+        ax_left_bottom.set_xlabel("Raman Shift (cm$^{-1}$)", fontsize=11)
+        ax_left_bottom.set_ylabel("Spectrum (sorted by intensity)", fontsize=11)
+        ax_left_bottom.set_xlim(wavenumber[0], wavenumber[-1])
+        ax_left_bottom.margins(x=0)
+        
+        # 将原本画在 ax_left_bottom 里的 colorbar 放入 cax_left
+        cbar_left = fig_left.colorbar(im_left, cax=cax_left)
+        cbar_left.set_label("Intensity (a.u.)", fontsize=10)
+        cbar_left.ax.tick_params(labelsize=8)
+        
+        fig_left.tight_layout(rect=[0, 0, 1, 0.97])
+        # 必须加上这句，防止 tight_layout 破坏我们设定的 0 间距
+        fig_left.subplots_adjust(hspace=0.0) 
+        
+        fig_left.savefig(os.path.join(save_dir, "Left_Combined_Spectrum_Heatmap.svg"), dpi=300, bbox_inches="tight", facecolor="none")
+        fig_left.savefig(os.path.join(save_dir, "Left_Combined_Spectrum_Heatmap.png"), dpi=300, bbox_inches="tight")
+        plt.close(fig_left)
 
     # 4. 导出图表及附加数据
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
-        save_svg = os.path.join(save_dir, "Comprehensive_Analysis_Dashboard.svg")
-        save_png = os.path.join(save_dir, "Comprehensive_Analysis_Dashboard.png")
-        fig.savefig(save_svg, dpi=300, bbox_inches="tight")
+        
+        # 从上级文件夹名称提取中间部分（如从 "000_0hRaw_processed" 提取 "0hRaw"）
+        parent_dir_name = os.path.basename(os.path.dirname(save_dir))  # 获取 save_folder 的名称
+        parts = parent_dir_name.split('_')
+        mid_name = parts[1] if len(parts) >= 2 else ""
+        
+        # 根据是否有中间名称调整文件名
+        if mid_name:
+            save_svg = os.path.join(save_dir, f"Comprehensive_Analysis_Dashboard_{mid_name}.svg")
+            save_png = os.path.join(save_dir, f"Comprehensive_Analysis_Dashboard_{mid_name}.png")
+        else:
+            save_svg = os.path.join(save_dir, "Comprehensive_Analysis_Dashboard.svg")
+            save_png = os.path.join(save_dir, "Comprehensive_Analysis_Dashboard.png")
+        
+        fig.savefig(save_svg, dpi=300, bbox_inches="tight", facecolor="none")
         fig.savefig(save_png, dpi=300, bbox_inches="tight")
+        
+        # 保存峰位信息
+        if len(peak_indices) > 0:
+            peak_info_path = os.path.join(save_dir, "peak_analysis.txt")
+            peak_info = np.column_stack([
+                wavenumber[peak_indices],
+                mean_spectrum[peak_indices],
+                spectra[:, peak_indices].std(axis=0)  # 峰位处的标准差
+            ])
+            np.savetxt(peak_info_path, peak_info, fmt="%.6f", 
+                      header="Peak_Wavenumber(cm-1)\tPeak_Intensity(a.u.)\tStd_Dev")
         
         pcc_save = os.path.join(save_dir, "pcc_matrix.txt")
         np.savetxt(pcc_save, pcc_matrix, fmt="%.6f", header=f"Pearson Correlation Coefficient Matrix ({n_spec}x{n_spec})")
@@ -731,7 +841,7 @@ def plot_comprehensive_dashboard(processor, save_dir=None):
         loadings_header = "Wavenumber " + " ".join([f"PC{i+1}({explained[i]:.1f}%)" for i in range(pca.n_components_)])
         np.savetxt(loadings_save, np.column_stack([wavenumber, pca.components_.T]), header=loadings_header, fmt="%.6f")
         
-        print(f"  📸 综合面板高清大图及数据矩阵已保存至: {save_dir}")
+        print(f"  📸 综合面板高清大图及分析数据已保存至: {save_dir}")
 
 # ======================== 全自动执行流水线 ======================== #
 
@@ -762,56 +872,118 @@ if __name__ == "__main__":
                             break
                 if target_file: break
     
-    data_folder, save_folder = None, None
-    task_label = None
+    data_folder = None
+    save_folder = None
+    task_label = "预处理"
+
+    raw_dir = None
+    result_dir = None
+    preprocess_input = None
+
     if target_file is not None:
-        with open(target_file, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-            if len(lines) >= 3:
-                task_label = lines[0].strip()
-                data_folder = lines[1].strip()
-                save_folder = lines[2].strip()
-            elif len(lines) == 2:
-                # 向后兼容：如果只有 2 行，则为旧格式（不带标签）
-                data_folder, save_folder = lines[0].strip(), lines[1].strip()
-                task_label = "拉曼预处理"
-    
-    if data_folder is None or save_folder is None:
-        print("❌ 未找到 target 文件或文件格式错误。")
-        print("   预期格式：")
-        print("   第一行: 任务标签 (如 '预处理')")
-        print("   第二行: 数据文件夹路径")
-        print("   第三行: 保存文件夹路径")
-        exit()
-    
-    print(f"🔎 已找到 target 文件: {target_file}")
-    print(f"   任务标签: {task_label}")
-    print(f"   数据路径: {data_folder}")
-    print(f"   保存路径: {save_folder}")
-    
+        with open(target_file, "r", encoding="utf-8") as f:
+            lines = [line.strip() for line in f.readlines() if line.strip()]
+
+        for i, line in enumerate(lines):
+            if line == "异常值":
+                if i + 1 < len(lines):
+                    raw_dir = lines[i + 1]
+
+            elif line == "预处理":
+                if i + 1 < len(lines):
+                    result_dir = lines[i + 1]
+
+            elif line == "预处理输入":
+                if i + 1 < len(lines):
+                    preprocess_input = lines[i + 1]
+
+        if result_dir is None:
+            raise RuntimeError(
+                "❌ target.txt 中未找到 [预处理] 标签"
+            )
+
+        save_folder = result_dir
+        if raw_dir:
+            raw_dir_norm = raw_dir.rstrip("/\\")
+            raw_parent_dir = os.path.dirname(raw_dir_norm)
+            raw_second_last = os.path.basename(raw_parent_dir)
+            raw_last = os.path.basename(raw_dir_norm)
+            if raw_second_last:
+                save_folder = os.path.join(save_folder, f"{raw_second_last}_processed", raw_last)
+        print(f"   读取 target.txt 中 预处理路径：{result_dir}")
+        if preprocess_input:
+            print(f"   读取 target.txt 中 预处理输入：{preprocess_input}")
+        if save_folder != result_dir:
+            print(f"   实际保存目录：{save_folder}")
+
     # ═══════════════════════════════════════════════════════════════════
     # 🎛️  统一配置中心 - 所有处理选项在此集中管理
     # ═══════════════════════════════════════════════════════════════════
     config = {
         # ━━━ 数据加载选项 ━━━
-        'has_subfolders': False,              # 数据是否有子文件夹结构
-        
+        'has_subfolders': True,
+
         # ━━━ 处理流程选项 ━━━
-        'plot_only': False,                   # 只画图模式：True = 直接加载已处理数据并画图
-        'generate_plots': True,               # 画图总开关：True = 生成并保存图表
-        
+        'plot_only': False ,
+        'generate_plots': True,
+
         # ━━━ 处理步骤开关 ━━━
-        'background_subtraction': True,       # 是否扣除背景光谱
-        'baseline_correction': True,          # 是否进行基线校正 (airPLS 算法)
-        'remove_outliers': False,              # 是否剔除异常样本 (PCA Mahalanobis)
-        'denoising': True,                    # 是否进行自适应降噪 (小波 + SG 滤波)
-        
+        'background_subtraction': True,
+        'baseline_correction': True,
+        'remove_outliers': False,
+        'denoising': True,
+
         # ━━━ 归一化选项 ━━━
-        'normalization': 'peak',              # 归一化方法: 'area' | 'maxmin' | 'peak' | None
-        'peak_position': 400,                 # 峰值归一化时的目标波数 (cm⁻¹)，仅当 normalization='peak' 时生效
+        'normalization': 'peak',
+        'peak_position': 400,
     }
     # ═══════════════════════════════════════════════════════════════════
-    
+
+    # 根据运行模式自动确定数据路径
+    if save_folder is not None:
+
+        if config['plot_only']:
+
+            data_folder = os.path.join(
+                save_folder,
+                "Data"
+            )
+
+        else:
+
+            if preprocess_input is not None:
+                data_folder = preprocess_input
+            else:
+                if raw_dir is None:
+                    raise RuntimeError(
+                        "❌ target.txt 中未找到 [异常值] 标签"
+                    )
+
+                # 注意：预处理代码的真实读取路径是异常值脚本的输出目录
+                # 即从 raw_dir 派生出 outlier output -> cleaned/kept_spectra
+                parent_dir = os.path.dirname(raw_dir.rstrip("/\\"))
+                folder_name = os.path.basename(raw_dir.rstrip("/\\"))
+                data_folder = os.path.join(
+                    parent_dir,
+                    folder_name + "_cleaned",
+                    "kept_spectra"
+                )
+
+    if data_folder is None or save_folder is None:
+        print("❌ 未找到 target 文件或文件格式错误。")
+        print("   预期格式：")
+        print("   异常值")
+        print("   D:\\原始数据路径")
+        print("")
+        print("   预处理")
+        print("   D:\\结果保存路径")
+        exit()
+
+    print(f"🔎 已找到 target 文件: {target_file}")
+    print(f"   任务标签: {task_label}")
+    print(f"   数据路径: {data_folder}")
+    print(f"   保存路径: {save_folder}")
+
     print("\n" + "="*50 + "\n🚀 拉曼光谱自动化处理流水线已启动\n" + "="*50)
     print(f"✓ 配置已加载:")
     print(f"  - 子文件夹支持: {config['has_subfolders']}")

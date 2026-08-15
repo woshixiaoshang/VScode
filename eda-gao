@@ -1,0 +1,145 @@
+import os
+import re
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import ttest_ind_from_stats
+
+# ─────────────────────────────────────────────
+# 1. 配置：高波数 3000 文件夹的路径字典
+# ─────────────────────────────────────────────
+# 脚本会自动去这些路径下寻找 peak_area_ratio_summary.txt
+DATA_DIRS = {
+    "Mac (0hRAW)": r"D:\aaaSCNU\0data\Raman\0处理\预处理processed\000_0hRaw_processed\3000",
+    "Foam (24h)":  r"D:\aaaSCNU\0data\Raman\0处理\预处理processed\000_24hFoam_processed\3000",
+    "Ra (8h)":     r"D:\aaaSCNU\0data\Raman\0处理\预处理processed\8hRa_processed\3000",
+    "HP-CD (8h)":  r"D:\aaaSCNU\0data\Raman\0处理\预处理processed\8hHP-CD_processed\3000",
+}
+
+OUTPUT_DIR = r"D:\aaaSCNU\0data\Raman\EDA\ppt_results"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# ─────────────────────────────────────────────
+# 2. 自动读取与解析 txt 文件
+# ─────────────────────────────────────────────
+def parse_summary_file(filepath):
+    """解析 txt 文件，提取样本数 N，以及各比值的 Mean 和 SD"""
+    with open(filepath, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # 提取样本数 N
+    n_match = re.search(r'有效光谱数:\s+(\d+)', content)
+    n = int(n_match.group(1)) if n_match else 100 # 找不到默认给100
+    
+    data = {"N": n}
+    
+    # 按【Ratio: 切割文本块
+    blocks = content.split('【Ratio: ')
+    for block in blocks[1:]: # 第0个是开头
+        ratio_name = block.split('】')[0].strip()
+        
+        mean_match = re.search(r'均值:\s+([0-9.]+)', block)
+        sd_match = re.search(r'标准差\(SD\):\s+([0-9.]+)', block)
+        
+        if mean_match and sd_match:
+            data[ratio_name] = {
+                'mean': float(mean_match.group(1)),
+                'sd': float(sd_match.group(1))
+            }
+    return data
+
+print("🚀 正在自动读取各组的高波数统计摘要...")
+parsed_data = {}
+for group_name, folder in DATA_DIRS.items():
+    file_path = os.path.join(folder, "peak_area_ratio_summary.txt")
+    if os.path.exists(file_path):
+        parsed_data[group_name] = parse_summary_file(file_path)
+        print(f"  ✓ 成功读取 {group_name}: N={parsed_data[group_name]['N']}")
+    else:
+        print(f"  ❌ 未找到文件: {file_path}")
+        # 如果报错，提供伪数据保证代码不崩溃，方便你排查
+        parsed_data[group_name] = {"N": 100, "Peak 2 / Peak 1": {"mean": 0, "sd": 0}, "Peak 1 / Peak 3": {"mean": 0, "sd": 0}, "Peak 2 / Peak 3": {"mean": 0, "sd": 0}}
+
+# ─────────────────────────────────────────────
+# 3. 整理绘图所需的数据列表
+# ─────────────────────────────────────────────
+groups = list(DATA_DIRS.keys())
+
+# 我们关注的三个关键比值
+ratio_keys = ["Peak 2 / Peak 1", "Peak 1 / Peak 3", "Peak 2 / Peak 3"]
+means = {k: [] for k in ratio_keys}
+sds   = {k: [] for k in ratio_keys}
+ns    = []
+
+for group in groups:
+    ns.append(parsed_data[group]["N"])
+    for key in ratio_keys:
+        means[key].append(parsed_data[group].get(key, {"mean": 0})["mean"])
+        sds[key].append(parsed_data[group].get(key, {"sd": 0})["sd"])
+
+# ─────────────────────────────────────────────
+# 4. 自动统计显著性检验 (T-test)
+# ─────────────────────────────────────────────
+def get_stars(p_val):
+    if p_val < 0.001: return "***"
+    elif p_val < 0.01: return "**"
+    elif p_val < 0.05: return "*"
+    else: return "ns"
+
+def get_p_value(group_idx1, group_idx2, ratio_key):
+    """基于 Mean, SD 和 N 计算两独立样本 T 检验的 P 值"""
+    m1, s1, n1 = means[ratio_key][group_idx1], sds[ratio_key][group_idx1], ns[group_idx1]
+    m2, s2, n2 = means[ratio_key][group_idx2], sds[ratio_key][group_idx2], ns[group_idx2]
+    
+    if s1 == 0 or s2 == 0: return 1.0 # 避免假数据报错
+    
+    _, p = ttest_ind_from_stats(mean1=m1, std1=s1, nobs1=n1,
+                                mean2=m2, std2=s2, nobs2=n2,
+                                equal_var=False) # Welch's t-test
+    return p
+
+# ─────────────────────────────────────────────
+# 5. 绘制高级分组柱状图
+# ─────────────────────────────────────────────
+print("🎨 正在生成并标注统计图表...")
+plt.rcParams.update({"font.family": "Arial", "axes.spines.top": False, "axes.spines.right": False, "figure.dpi": 300})
+
+fig, ax = plt.subplots(figsize=(10, 6.5))
+
+x = np.arange(len(groups))
+width = 0.25
+
+colors = ["#89B4C4", "#D1603D", "#E5A962"] # 浅蓝、陶红、砂黄
+labels = ['Peak 2 / Peak 1\n(Lipid Conformation)', 
+          'Peak 1 / Peak 3\n(Lipid-to-Protein Ratio)', 
+          'Peak 2 / Peak 3\n(Lipid-to-Protein Ref.)']
+
+rects1 = ax.bar(x - width, means[ratio_keys[0]], width, yerr=sds[ratio_keys[0]], label=labels[0], color=colors[0], edgecolor="black", capsize=5, alpha=0.9)
+rects2 = ax.bar(x,         means[ratio_keys[1]], width, yerr=sds[ratio_keys[1]], label=labels[1], color=colors[1], edgecolor="black", capsize=5, alpha=0.95)
+rects3 = ax.bar(x + width, means[ratio_keys[2]], width, yerr=sds[ratio_keys[2]], label=labels[2], color=colors[2], edgecolor="black", capsize=5, alpha=0.9)
+
+# 已移除显著性标注，保持图形简洁
+max_y_p1p3 = max([m + s for m, s in zip(means[ratio_keys[1]], sds[ratio_keys[1]])])
+
+# 图表美化
+ax.set_title("High-Wavenumber SERS Signatures:\nMacrophage Lipid Accumulation & Conformation", 
+             fontsize=17, fontweight='bold', pad=20, color="#111111")
+ax.set_ylabel("Integrated Peak Area Ratio", fontsize=14, fontweight='bold', labelpad=10)
+ax.set_xticks(x)
+ax.set_xticklabels(groups, fontsize=13, fontweight='bold')
+
+# 动态调整 Y 轴上限
+ax.set_ylim(0, max_y_p1p3 + 0.4)
+
+# 将图例放在图外，避免遮挡柱子
+ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=11, framealpha=0.9, edgecolor="black", ncol=1, borderaxespad=0)
+ax.grid(False)
+plt.yticks(fontsize=12)
+fig.tight_layout()
+
+# 保存
+out_svg = os.path.join(OUTPUT_DIR, "ppt_04_high_wavenumber_auto_ratios.svg")
+plt.savefig(out_svg, format="svg", transparent=True, bbox_inches='tight', facecolor='none', edgecolor='none')
+plt.close(fig)
+
+print(f"🎉 自动化组间对比图 (含自动 P 值标注) 已生成！")
+print(f"  👉 SVG: {out_svg}")
